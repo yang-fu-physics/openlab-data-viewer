@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools<69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openlab-data-viewer"
+version = "0.20.1"
+description = "Standalone OpenLab and delimited-text data viewer"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+    "PySide2==5.15.2.1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

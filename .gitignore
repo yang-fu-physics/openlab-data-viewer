@@ -1,0 +1,9 @@
+.venv-win7/
+.python/
+.uv-cache/
+build/
+dist/
+__pycache__/
+*.py[cod]
+*-smoke.png
+!OpenLabDataViewer.spec
