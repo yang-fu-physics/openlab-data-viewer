@@ -1,0 +1,45 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Build and test the viewer
+        shell: cmd
+        run: build.bat
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $file = "dist\OpenLabDataViewer.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash
+          "$hash  OpenLabDataViewer.exe" | Set-Content -Encoding ascii "dist\OpenLabDataViewer.exe.sha256"
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            "dist\OpenLabDataViewer.exe" `
+            "dist\OpenLabDataViewer.exe.sha256" `
+            --title "OpenLab Data Viewer $tag" `
+            --generate-notes
