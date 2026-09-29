@@ -60,12 +60,21 @@ of that file.
 
 ## Filter data rows
 
-Choose `Data Filter` in a data view to edit five filter rows. Each row has an
-`Enabled` checkbox, a numeric `Data` column, and inclusive `Min` and `Max`
-bounds. Enabled rows are combined with `AND`; a blank bound is unbounded and a
-row with both bounds blank has no effect. Finite decimal and scientific notation
-values are accepted. `Apply` keeps the dialog open, `OK` applies and closes it,
-`Cancel` discards edits that were not applied, and `Clear` clears the editor.
+Choose `Data Filter` in a data view to edit five filter rows. The first row is
+always the fixed `Time` row when a timestamp/time column is available; the
+remaining four rows have an `Enabled` checkbox, a numeric `Data` column, and
+inclusive `Min` and `Max` bounds. If no time column is detected, the Time row
+remains visible but is disabled. Enabled rows are combined with `AND`.
+
+For a reliable timestamp header mapping, the Time row displays instrument wall
+time as `YYYY-MM-DD HH:MM[:SS[.fff]]`, including values across midnight. If no
+reliable mapping exists, it explicitly uses elapsed duration: enter seconds or
+`HH:MM:SS`/`days HH:MM:SS`, with hours allowed to exceed 24. Small numeric values
+are never guessed to be an epoch. A blank Min means `<= Max`, a blank Max means
+`>= Min`, and both blank disables that row; bounds are inclusive. `Min > Max`
+is rejected. General rows accept finite decimal and scientific notation values.
+`Apply` keeps the dialog open, `OK` applies and closes it, `Cancel` discards
+edits that were not applied, and `Clear` clears the editor.
 
 The status line reports matched rows out of the complete document and the plot
 footer reports the same count. An empty match is shown explicitly. Filtering
@@ -76,9 +85,13 @@ resets zoom. If a refreshed schema removes or makes a filter column nonnumeric,
 that row is disabled and the status line names the affected column.
 
 Filters are saved only by the existing explicit `File > Save PLT` action. New
-PLT files use format version 3. Version 1 and version 2 PLT files load with no
-filters. New data views inherit filter columns by position only when the total
-column count matches; filters are cleared when it differs.
+PLT files use format version 4. Version 1 and version 2 PLT files load with no
+filters, and version 3 files keep their original five-row filter state. If a
+legacy first-row filter is displaced by the fixed Time row, it is kept in a
+general row or an overflow entry rather than discarded. New data views inherit
+filter columns by position only when the total column count matches; filters
+are cleared when it differs. Timestamp suffix discovery for the Time row does
+not change positional axis matching.
 
 ## Plot settings
 

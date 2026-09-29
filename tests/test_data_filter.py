@@ -131,11 +131,12 @@ class DataFilterTests(unittest.TestCase):
                 DataFilterRow(),
                 DataFilterRow(),
                 DataFilterRow(),
-            )
+            ),
+            overflow_rows=(DataFilterRow(True, "overflow-gone"),),
         )
         self.assertEqual(
             data_filter.invalid_columns(("x",), ("x",)),
-            ("gone", "also-gone"),
+            ("gone", "also-gone", "overflow-gone"),
         )
         updated, invalid = data_filter.disable_invalid_columns(
             ("x",),
@@ -143,6 +144,37 @@ class DataFilterTests(unittest.TestCase):
         )
         self.assertEqual(invalid, ())
         self.assertEqual(updated, DataFilter.empty())
+
+    def test_overflow_rows_still_use_original_document_indices(self) -> None:
+        document = self._document()
+        data_filter = DataFilter(
+            tuple(DataFilterRow() for _ in range(5)),
+            overflow_rows=(DataFilterRow(True, "x", 2, 3),),
+        )
+        self.assertEqual(matching_row_indices(document, data_filter), (1, 2))
+
+    def test_reserving_time_row_moves_legacy_first_row_without_losing_it(self) -> None:
+        legacy = DataFilter(
+            (
+                DataFilterRow(True, "signal", 1, 2),
+                DataFilterRow(),
+                DataFilterRow(),
+                DataFilterRow(),
+                DataFilterRow(),
+            )
+        )
+        reserved = legacy.reserve_time_column("Timestamp_003")
+        self.assertIsNone(reserved.rows[0].column)
+        self.assertEqual(reserved.rows[1].column, "signal")
+        self.assertEqual(reserved.active_rows, (legacy.rows[0],))
+
+    def test_reserving_time_row_uses_overflow_when_all_rows_are_occupied(self) -> None:
+        legacy = DataFilter(
+            tuple(DataFilterRow(True, "column%d" % index, 0, 1) for index in range(5))
+        )
+        reserved = legacy.reserve_time_column("Timestamp_003")
+        self.assertIsNone(reserved.rows[0].column)
+        self.assertEqual(reserved.overflow_rows, (legacy.rows[0],))
 
 
 if __name__ == "__main__":

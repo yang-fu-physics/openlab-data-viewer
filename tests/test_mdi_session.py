@@ -221,6 +221,121 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(len(applied), 1)
         self.assertEqual(dialog.result(), 0)
 
+    def test_time_filter_dialog_keeps_a_fixed_row_and_supports_unbounded_sides(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "timestamp.csv"
+        path.write_text(
+            "Timestamp_003,Signal_003\n"
+            ".848,1\n"
+            "5.474,2\n"
+            "10,3\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        dialog = self.DataFilterDialog(
+            browser.document.numeric_columns(),
+            browser.canvas.data_filter,
+            browser,
+            apply_callback=browser._apply_data_filter,
+            time_context=browser.canvas.time_filter_context,
+        )
+        self.addCleanup(dialog.deleteLater)
+        applied = []
+        dialog.filterApplied.connect(applied.append)
+
+        self.assertEqual(dialog.column_combos[0].currentData(), "Timestamp_003")
+        self.assertFalse(dialog.column_combos[0].isEnabled())
+        self.assertEqual(len(dialog.column_combos), 5)
+        self.assertTrue(
+            any(
+                "elapsed time" in label.text()
+                for label in dialog.findChildren(type(dialog.error_label))
+            )
+        )
+
+        dialog.enabled_checks[0].setChecked(True)
+        dialog.time_minimum_edit.setText("")
+        dialog.time_maximum_edit.setText("00:00:05.474")
+        dialog.apply()
+        self.assertEqual(browser.canvas.matched_row_indices, (0, 1))
+        self.assertIsNone(applied[-1].rows[0].minimum)
+        self.assertAlmostEqual(applied[-1].rows[0].maximum, 5.474)
+
+        dialog.time_minimum_edit.setText("00:00:05.474")
+        dialog.time_maximum_edit.setText("")
+        dialog.apply()
+        self.assertEqual(browser.canvas.matched_row_indices, (1, 2))
+        self.assertAlmostEqual(applied[-1].rows[0].minimum, 5.474)
+        self.assertIsNone(applied[-1].rows[0].maximum)
+
+        dialog.time_minimum_edit.clear()
+        dialog.time_maximum_edit.clear()
+        dialog.apply()
+        self.assertFalse(browser.canvas.data_filter.is_active)
+        self.assertEqual(browser.canvas.matched_row_indices, (0, 1, 2))
+
+        dialog.time_minimum_edit.setText("00:00:06")
+        dialog.time_maximum_edit.setText("00:00:05")
+        before_error = len(applied)
+        dialog.apply()
+        self.assertEqual(len(applied), before_error)
+        self.assertIn("minimum", dialog.error_label.text())
+
+    def test_time_filter_row_is_visible_but_disabled_without_a_time_column(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "no-time.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        dialog = self.DataFilterDialog(
+            browser.document.numeric_columns(),
+            browser.canvas.data_filter,
+            browser,
+            time_context=browser.canvas.time_filter_context,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.assertIsNone(dialog.column_combos[0])
+        self.assertFalse(dialog.enabled_checks[0].isEnabled())
+        self.assertFalse(dialog.minimum_edits[0].isEnabled())
+        self.assertEqual(dialog.time_column_label.text(), "Unavailable")
+
+    def test_time_filter_row_is_cleaned_when_refresh_removes_the_time_column(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "time-schema.csv"
+        path.write_text(
+            "Timestamp_003,y\n.848,10\n5.474,20\n10,30\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        browser.canvas.set_data_filter(self._filter("Timestamp_003", None, 5.474))
+        self.assertEqual(browser.canvas.matched_row_indices, (0, 1))
+
+        path.write_text("x,z\n1,10\n2,20\n3,30\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        self.assertEqual(browser.canvas.data_filter, self.DataFilter.empty())
+        browser._emit_display_format()
+        self.assertIn("Filter disabled", browser.status_label.text())
+
     def test_filter_dialog_rejects_schema_changed_during_apply(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -254,6 +369,39 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(dialog.result(), 0)
         self.assertIn("Filter not applied", dialog.error_label.text())
         self.assertFalse(browser.canvas.data_filter.is_active)
+
+    def test_filter_dialog_rejects_stale_noop_column_after_schema_change(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "noop-dialog.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        dialog = self.DataFilterDialog(
+            ("x", "y"),
+            browser.canvas.data_filter,
+            browser,
+            apply_callback=browser._apply_data_filter,
+            time_context=browser.canvas.time_filter_context,
+        )
+        self.addCleanup(dialog.deleteLater)
+        dialog.enabled_checks[1].setChecked(True)
+        dialog.column_combos[1].setCurrentIndex(2)
+
+        path.write_text("x,z\n1,100\n2,200\n3,300\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        dialog.apply()
+        self.assertEqual(dialog.result(), 0)
+        self.assertIn("Filter not applied", dialog.error_label.text())
 
     def test_child_views_share_main_window_and_inherit_recent_format(self) -> None:
         temporary = tempfile.TemporaryDirectory()

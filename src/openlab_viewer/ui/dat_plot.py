@@ -61,6 +61,11 @@ from ..plot_format import (
     PlotFormat,
     PlotFormatError,
 )
+from ..time_filter import (
+    TimeFilterContext,
+    discover_time_column,
+    time_filter_context,
+)
 from .scaling import scaled, scaled_float
 from .window_sizing import fit_initial_window_width
 
@@ -247,6 +252,14 @@ class DatPlotCanvas(QWidget):
         return "Filter: %d/%d rows" % (len(self._matched_row_indices), total)
 
     @property
+    def time_filter_context(self) -> TimeFilterContext:
+        """Return the fixed first-row time context for the loaded document."""
+
+        if self.document is None:
+            return TimeFilterContext(None)
+        return time_filter_context(self.document)
+
+    @property
     def _view_range(self) -> tuple[float, float, float, float] | None:
         """Compatibility property returning the active manual view range."""
 
@@ -257,7 +270,10 @@ class DatPlotCanvas(QWidget):
     def set_document(self, document: DatDocument, preserve_view: bool = False) -> None:
         """Replace the snapshot, select numeric columns, and preserve zoom on request."""
 
-        valid_filter, invalid_filter_columns = self.data_filter.disable_invalid_columns(
+        prepared_filter = self.data_filter.reserve_time_column(
+            discover_time_column(document.columns)
+        )
+        valid_filter, invalid_filter_columns = prepared_filter.disable_invalid_columns(
             document.columns,
             document.numeric_columns(),
         )
@@ -347,6 +363,9 @@ class DatPlotCanvas(QWidget):
         if not isinstance(data_filter, DataFilter):
             raise PlotFormatError("Data filter must contain five validated rows")
         if self.document is not None:
+            data_filter = data_filter.reserve_time_column(
+                discover_time_column(self.document.columns)
+            )
             invalid = data_filter.active_invalid_columns(
                 self.document.columns,
                 self.document.numeric_columns(),
@@ -446,7 +465,10 @@ class DatPlotCanvas(QWidget):
         missing = [name for name in plot_format.y_columns if name not in numeric]
         if missing:
             raise PlotFormatError("Y columns are not available: " + ", ".join(missing))
-        invalid_filters = plot_format.filters.active_invalid_columns(
+        filters = plot_format.filters.reserve_time_column(
+            discover_time_column(self.document.columns)
+        )
+        invalid_filters = filters.active_invalid_columns(
             self.document.columns,
             numeric,
         )
@@ -460,7 +482,7 @@ class DatPlotCanvas(QWidget):
         self.layout_mode = plot_format.layout
         self.x_scale = plot_format.x_scale
         self.y_scale = plot_format.y_scale
-        self.data_filter, _ = plot_format.filters.disable_invalid_columns(
+        self.data_filter, _ = filters.disable_invalid_columns(
             self.document.columns,
             numeric,
         )
@@ -527,6 +549,7 @@ class DatPlotCanvas(QWidget):
                 self.y_columns = y_columns
 
             filter_rows = []
+            overflow_rows = []
             if len(template.filter_column_indices) == FILTER_ROW_COUNT:
                 for filter_row, column_index in zip(
                     template.plot_format.filters.rows,
@@ -554,7 +577,41 @@ class DatPlotCanvas(QWidget):
                                 maximum=filter_row.maximum,
                             )
                         )
-                self.data_filter = DataFilter(tuple(filter_rows))
+                if len(template.filter_overflow_column_indices) == len(
+                    template.plot_format.filters.overflow_rows
+                ):
+                    for filter_row, column_index in zip(
+                        template.plot_format.filters.overflow_rows,
+                        template.filter_overflow_column_indices,
+                    ):
+                        if filter_row.column is None:
+                            overflow_rows.append(filter_row)
+                            continue
+                        if column_index is None:
+                            if not filter_row.is_noop:
+                                invalid_filter_columns.append(filter_row.column)
+                            overflow_rows.append(DataFilterRow())
+                            continue
+                        column = numeric_at(column_index)
+                        if column is None:
+                            if not filter_row.is_noop:
+                                invalid_filter_columns.append(filter_row.column)
+                            overflow_rows.append(DataFilterRow())
+                        else:
+                            overflow_rows.append(
+                                DataFilterRow(
+                                    enabled=filter_row.enabled,
+                                    column=column,
+                                    minimum=filter_row.minimum,
+                                    maximum=filter_row.maximum,
+                                )
+                            )
+                self.data_filter = DataFilter(
+                    tuple(filter_rows),
+                    tuple(overflow_rows),
+                ).reserve_time_column(
+                    discover_time_column(self.document.columns)
+                )
             else:
                 self.data_filter = DataFilter.empty()
         else:

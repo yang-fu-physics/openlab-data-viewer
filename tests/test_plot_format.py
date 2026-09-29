@@ -21,7 +21,7 @@ from openlab_viewer.data_filter import DataFilter, DataFilterRow  # noqa: E402
 
 
 class PlotFormatTests(unittest.TestCase):
-    def test_v3_round_trip_serializes_five_filter_rows(self) -> None:
+    def test_v4_round_trip_serializes_five_filter_rows(self) -> None:
         settings = PlotFormat(
             data_file="sample.csv",
             layout="overlay",
@@ -38,9 +38,45 @@ class PlotFormatTests(unittest.TestCase):
             ),
         )
         payload = settings.to_dict()
-        self.assertEqual(payload["version"], 3)
+        self.assertEqual(payload["version"], 4)
         self.assertEqual(len(payload["filters"]), 5)
         self.assertEqual(PlotFormat.from_dict(payload), settings)
+
+    def test_v4_preserves_filter_overflow_rows(self) -> None:
+        settings = PlotFormat(
+            data_file="sample.csv",
+            layout="overlay",
+            x_column="x",
+            y_columns=("y",),
+            filters=DataFilter(
+                tuple(DataFilterRow() for _ in range(5)),
+                (DataFilterRow(True, "y", 3.0, None),),
+            ),
+        )
+        payload = settings.to_dict()
+        self.assertEqual(payload["version"], 4)
+        self.assertEqual(len(payload["filter_overflow"]), 1)
+        self.assertEqual(PlotFormat.from_dict(payload), settings)
+
+    def test_v3_load_keeps_the_legacy_five_rows(self) -> None:
+        raw = {
+            "format": "OpenLab Control Plot Format",
+            "version": 3,
+            "data_file": "sample.dat",
+            "layout": "overlay",
+            "x_axis": "x",
+            "y_axes": ["y"],
+            "filters": [
+                {"enabled": True, "column": "x", "min": 1, "max": 2},
+                {"enabled": False, "column": None, "min": None, "max": None},
+                {"enabled": False, "column": None, "min": None, "max": None},
+                {"enabled": False, "column": None, "min": None, "max": None},
+                {"enabled": False, "column": None, "min": None, "max": None},
+            ],
+        }
+        loaded = PlotFormat.from_dict(raw)
+        self.assertEqual(loaded.filters.rows[0].column, "x")
+        self.assertEqual(loaded.filters.overflow_rows, ())
 
     def test_v1_and_v2_have_no_filters(self) -> None:
         for version in (1, 2):

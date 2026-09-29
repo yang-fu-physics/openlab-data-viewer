@@ -18,8 +18,8 @@ from .data_filter import DataFilter
 
 
 PLOT_FORMAT_MARKER = "OpenLab Control Plot Format"
-PLOT_FORMAT_VERSION = 3
-SUPPORTED_PLOT_FORMAT_VERSIONS = {1, 2, PLOT_FORMAT_VERSION}
+PLOT_FORMAT_VERSION = 4
+SUPPORTED_PLOT_FORMAT_VERSIONS = {1, 2, 3, PLOT_FORMAT_VERSION}
 PLOT_LAYOUTS = {"overlay", "stacked"}
 LINEAR_SCALE = "linear"
 LOG_SCALE = "log"
@@ -98,7 +98,7 @@ class PlotFormat:
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON object with format marker and version."""
 
-        return {
+        payload = {
             "format": PLOT_FORMAT_MARKER,
             "version": PLOT_FORMAT_VERSION,
             "data_file": self.data_file,
@@ -118,6 +118,11 @@ class PlotFormat:
                 },
             },
         }
+        if self.filters.overflow_rows:
+            payload["filter_overflow"] = [
+                row.to_dict() for row in self.filters.overflow_rows
+            ]
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> PlotFormat:
@@ -148,7 +153,10 @@ class PlotFormat:
         }
         if version >= 3:
             try:
-                filters = DataFilter.from_list(raw["filters"])
+                filters = DataFilter.from_list(
+                    raw["filters"],
+                    raw.get("filter_overflow"),
+                )
             except KeyError as exc:
                 raise PlotFormatError("filters must be a five-row list") from exc
             except ValueError as exc:
@@ -181,6 +189,7 @@ class DisplayFormatTemplate:
     y_column_indices: tuple[int, ...]
     stacked_y_ranges: tuple[Range | None, ...] = ()
     filter_column_indices: tuple[int | None, ...] = ()
+    filter_overflow_column_indices: tuple[int | None, ...] = ()
 
 
 def plot_format_path(data_path: str | Path, *, exact_name: bool = False) -> Path:

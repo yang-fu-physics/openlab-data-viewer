@@ -305,6 +305,7 @@ class DatBrowserWidget(QWidget):
             self.canvas.data_filter,
             self,
             apply_callback=self._apply_data_filter,
+            time_context=self.canvas.time_filter_context,
         )
         try:
             dialog.exec_()
@@ -318,6 +319,14 @@ class DatBrowserWidget(QWidget):
             self._filter_status = "Filter not applied: %s" % exc
             self._update_status(self.canvas.x_label, self.canvas.y_columns)
             raise
+        if self.canvas.data_filter != data_filter:
+            error = PlotFormatError(
+                "The data schema changed while this dialog was open; "
+                "reopen the filter dialog and review the columns"
+            )
+            self._filter_status = "Filter not applied: %s" % error
+            self._update_status(self.canvas.x_label, self.canvas.y_columns)
+            raise error
         self._filter_status = ""
         self._update_status(self.canvas.x_label, self.canvas.y_columns)
         return True
@@ -651,6 +660,12 @@ class DatBrowserWidget(QWidget):
                     if row.column is None
                     else columns.index(row.column)
                     for row in self.canvas.data_filter.rows
+                ),
+                filter_overflow_column_indices=tuple(
+                    None
+                    if row.column is None
+                    else columns.index(row.column)
+                    for row in self.canvas.data_filter.overflow_rows
                 ),
             )
         )

@@ -102,6 +102,7 @@ class DataFilter:
     """The five-row filter state owned by one data view."""
 
     rows: tuple[DataFilterRow, ...] = field(default_factory=_empty_rows)
+    overflow_rows: tuple[DataFilterRow, ...] = ()
 
     def __post_init__(self) -> None:
         rows = tuple(self.rows)
@@ -111,7 +112,11 @@ class DataFilter:
             )
         if any(not isinstance(row, DataFilterRow) for row in rows):
             raise ValueError("Data filter rows must be DataFilterRow values")
+        overflow_rows = tuple(self.overflow_rows)
+        if any(not isinstance(row, DataFilterRow) for row in overflow_rows):
+            raise ValueError("Overflow filter rows must be DataFilterRow values")
         object.__setattr__(self, "rows", rows)
+        object.__setattr__(self, "overflow_rows", overflow_rows)
 
     @classmethod
     def empty(cls) -> "DataFilter":
@@ -123,7 +128,11 @@ class DataFilter:
     def active_rows(self) -> tuple[DataFilterRow, ...]:
         """Return only rows that impose a bounded condition."""
 
-        return tuple(row for row in self.rows if not row.is_noop)
+        return tuple(
+            row
+            for row in self.rows + self.overflow_rows
+            if not row.is_noop
+        )
 
     @property
     def is_active(self) -> bool:
@@ -135,7 +144,11 @@ class DataFilter:
         return [row.to_dict() for row in self.rows]
 
     @classmethod
-    def from_list(cls, raw: Any) -> "DataFilter":
+    def from_list(
+        cls,
+        raw: Any,
+        overflow_raw: Any = None,
+    ) -> "DataFilter":
         """Validate and construct a filter from external JSON data."""
 
         if not isinstance(raw, list):
@@ -144,7 +157,43 @@ class DataFilter:
             raise ValueError(
                 "filters must contain exactly %d rows" % FILTER_ROW_COUNT
             )
-        return cls(tuple(DataFilterRow.from_dict(item) for item in raw))
+        if overflow_raw is None:
+            overflow_raw = []
+        if not isinstance(overflow_raw, list):
+            raise ValueError("filter_overflow must be a list")
+        return cls(
+            tuple(DataFilterRow.from_dict(item) for item in raw),
+            tuple(DataFilterRow.from_dict(item) for item in overflow_raw),
+        )
+
+    def reserve_time_column(self, time_column: str | None) -> "DataFilter":
+        """Reserve row zero for time without discarding a legacy filter."""
+
+        rows = list(self.rows)
+        first = rows[0]
+        if time_column is not None:
+            if first.column == time_column:
+                return self
+            for index in range(1, FILTER_ROW_COUNT):
+                if rows[index].column == time_column:
+                    rows[0], rows[index] = rows[index], first
+                    return DataFilter(tuple(rows), self.overflow_rows)
+            for index, row in enumerate(self.overflow_rows):
+                if row.column == time_column:
+                    overflow = list(self.overflow_rows)
+                    overflow.pop(index)
+                    rows[0] = row
+                    if first.column is not None:
+                        overflow.insert(0, first)
+                    return DataFilter(tuple(rows), tuple(overflow))
+        if first.column is None:
+            return self
+        rows[0] = DataFilterRow()
+        for index in range(1, FILTER_ROW_COUNT):
+            if rows[index].column is None:
+                rows[index] = first
+                return DataFilter(tuple(rows), self.overflow_rows)
+        return DataFilter(tuple(rows), (first,) + self.overflow_rows)
 
     def invalid_columns(
         self,
@@ -158,7 +207,7 @@ class DataFilter:
         return tuple(
             dict.fromkeys(
                 row.column
-                for row in self.rows
+                for row in self.rows + self.overflow_rows
                 if row.column is not None
                 if row.column not in available or row.column not in numeric
             )
@@ -205,7 +254,8 @@ class DataFilter:
                     if row.column in invalid_set
                     else row
                     for row in self.rows
-                )
+                ),
+                tuple(row for row in self.overflow_rows if row.column not in invalid_set),
             ),
             active_invalid,
         )
