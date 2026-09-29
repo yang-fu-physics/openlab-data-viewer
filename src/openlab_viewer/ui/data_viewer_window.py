@@ -136,6 +136,11 @@ class DataViewerWindow(QMainWindow):
         index = self.mdi_area.subWindowList().index(subwindow)
         offset = scaled(28)
         area = self.mdi_area.viewport().rect()
+        if area.width() > 0 and area.height() > 0:
+            subwindow.resize(
+                min(subwindow.width(), area.width()),
+                min(subwindow.height(), area.height()),
+            )
         max_x = max(0, area.width() - subwindow.width() - offset)
         max_y = max(0, area.height() - subwindow.height() - offset)
         subwindow.move(

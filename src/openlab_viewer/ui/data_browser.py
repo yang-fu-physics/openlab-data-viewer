@@ -34,6 +34,7 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
+from ..data_filter import DataFilter
 from ..data_reader import (
     DataDocument,
     DataFormatOptions,
@@ -49,6 +50,7 @@ from ..plot_format import (
     save_plot_format,
 )
 from .data_import_dialog import DataImportDialog
+from .data_filter_dialog import DataFilterDialog
 from .dat_plot import OVERLAY_LAYOUT, STACKED_LAYOUT, DatPlotCanvas, PlotHit
 from .scaling import scaled
 from .window_sizing import fit_initial_window_width
@@ -174,6 +176,7 @@ class DatBrowserWidget(QWidget):
         self._suspend_format_save = False
         self._format_status = ""
         self._schema_status = ""
+        self._filter_status = ""
         self._last_auto_save_error: str | None = None
         self.allow_import = allow_import
         self.explicit_plot_save = explicit_plot_save
@@ -199,6 +202,7 @@ class DatBrowserWidget(QWidget):
         import_button = QPushButton("Import Settings")
         reload_button = QPushButton("Reload")
         self.save_format_button = QPushButton("Save PLT")
+        self.data_filter_button = QPushButton("Data Filter")
         reset_button = QPushButton("Reset Zoom")
         self.auto_refresh_checkbox = QCheckBox("Auto-refresh")
         self.auto_refresh_checkbox.setToolTip("Poll the current file every 5 seconds")
@@ -211,6 +215,7 @@ class DatBrowserWidget(QWidget):
         controls.addWidget(self.save_format_button, 1, 0)
         controls.addWidget(reset_button, 1, 1)
         controls.addWidget(self.auto_refresh_checkbox, 1, 2)
+        controls.addWidget(self.data_filter_button, 1, 3)
         controls.setColumnStretch(5, 1)
         layout.addLayout(controls)
 
@@ -227,6 +232,7 @@ class DatBrowserWidget(QWidget):
         self.save_format_button.clicked.connect(
             lambda checked=False: self.save_format(show_errors=True)
         )
+        self.data_filter_button.clicked.connect(self.open_data_filter)
         reset_button.clicked.connect(lambda checked=False: self.canvas.reset_zoom())
         self.layout_combo.currentIndexChanged.connect(self._layout_selected)
         self.canvas.openRequested.connect(self.open_dialog)
@@ -237,6 +243,7 @@ class DatBrowserWidget(QWidget):
         self.canvas.reloadFormatRequested.connect(self.reload_format)
         self.canvas.axesChanged.connect(self._update_status)
         self.canvas.displayChanged.connect(self._display_changed)
+        self.canvas.filterInvalidated.connect(self._filter_invalidated)
         self.canvas.pointActivated.connect(self._show_point_details)
 
         self.monitor_timer = QTimer(self)
@@ -282,6 +289,47 @@ class DatBrowserWidget(QWidget):
             )
             return
         self._open_import_dialog(source, self.format_options)
+
+    def open_data_filter(self) -> None:
+        """Open the five-row filter editor for this independent data view."""
+
+        if self.document is None:
+            QMessageBox.information(
+                self,
+                "Data Filter",
+                "Open a data file before configuring a data filter.",
+            )
+            return
+        dialog = DataFilterDialog(
+            self.document.numeric_columns(),
+            self.canvas.data_filter,
+            self,
+            apply_callback=self._apply_data_filter,
+        )
+        try:
+            dialog.exec_()
+        finally:
+            dialog.deleteLater()
+
+    def _apply_data_filter(self, data_filter: DataFilter) -> bool:
+        try:
+            self.canvas.set_data_filter(data_filter)
+        except PlotFormatError as exc:
+            self._filter_status = "Filter not applied: %s" % exc
+            self._update_status(self.canvas.x_label, self.canvas.y_columns)
+            raise
+        self._filter_status = ""
+        self._update_status(self.canvas.x_label, self.canvas.y_columns)
+        return True
+
+    def _filter_invalidated(self, columns: object) -> None:
+        names = tuple(str(column) for column in columns)
+        if names:
+            self._filter_status = (
+                "Filter disabled for missing or non-numeric column(s): "
+                + ", ".join(names)
+            )
+            self._update_status(self.canvas.x_label, self.canvas.y_columns)
 
     def _open_import_dialog(
         self,
@@ -434,12 +482,15 @@ class DatBrowserWidget(QWidget):
             if schema_changed
             else ""
         )
+        self._filter_status = ""
         self.path_label.setText(str(source))
 
         format_error: str | None = None
         format_loaded = False
         self._suspend_format_save = True
         try:
+            if new_file:
+                self.canvas.set_data_filter(DataFilter.empty(), notify=False)
             self.canvas.set_document(document, preserve_view=preserve_view)
             if new_file:
                 settings_path = find_plot_format(source, exact_name=True)
@@ -460,6 +511,7 @@ class DatBrowserWidget(QWidget):
                         self._format_status = (
                             "Previous layout applied; column count differs"
                         )
+                        self._filter_status = "Previous filters cleared; column count differs"
                 self._initial_display_format = None
         finally:
             self._suspend_format_save = False
@@ -594,6 +646,12 @@ class DatBrowserWidget(QWidget):
                     plot_format.stacked_y_ranges.get(name)
                     for name in self.canvas.y_columns
                 ),
+                filter_column_indices=tuple(
+                    None
+                    if row.column is None
+                    else columns.index(row.column)
+                    for row in self.canvas.data_filter.rows
+                ),
             )
         )
 
@@ -663,9 +721,11 @@ class DatBrowserWidget(QWidget):
         layout = "Overlay" if self.canvas.layout_mode == OVERLAY_LAYOUT else "Stacked / Shared X"
         format_text = " | %s" % self._format_status if self._format_status else ""
         schema_text = " | %s" % self._schema_status if self._schema_status else ""
+        filter_text = " | %s" % self.canvas.filter_summary
+        filter_status_text = " | %s" % self._filter_status if self._filter_status else ""
         refresh_text = "on" if self.auto_refresh_checkbox.isChecked() else "off"
         self.status_label.setText(
-            "%d rows | X: %s [%s] | Y: %s [%s] | %s | refreshed %s | auto-refresh %s%s%s"
+            "%d rows | X: %s [%s] | Y: %s [%s] | %s | refreshed %s | auto-refresh %s%s%s%s%s"
             % (
                 len(self.document.rows),
                 x_label,
@@ -677,6 +737,8 @@ class DatBrowserWidget(QWidget):
                 refresh_text,
                 format_text,
                 schema_text,
+                filter_text,
+                filter_status_text,
             )
         )
 

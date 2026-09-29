@@ -23,11 +23,237 @@ class MdiSessionTests(unittest.TestCase):
         cls.application = QApplication.instance() or QApplication([])
         from openlab_viewer.data_reader import DataFormatOptions
         from openlab_viewer.data_viewer_app import DataViewerSession
+        from openlab_viewer.data_filter import DataFilter, DataFilterRow
+        from openlab_viewer.plot_format import PlotFormat
         from openlab_viewer.ui.dat_plot import STACKED_LAYOUT
+        from openlab_viewer.ui.data_filter_dialog import DataFilterDialog
 
         cls.DataFormatOptions = DataFormatOptions
         cls.DataViewerSession = DataViewerSession
+        cls.DataFilter = DataFilter
+        cls.DataFilterRow = DataFilterRow
+        cls.PlotFormat = PlotFormat
+        cls.DataFilterDialog = DataFilterDialog
         cls.STACKED_LAYOUT = STACKED_LAYOUT
+
+    def _filter(self, column: str, minimum: float | None, maximum: float | None):
+        return self.DataFilter(
+            (
+                self.DataFilterRow(True, column, minimum, maximum),
+                self.DataFilterRow(),
+                self.DataFilterRow(),
+                self.DataFilterRow(),
+                self.DataFilterRow(),
+            )
+        )
+
+    def test_filter_uses_one_original_row_selection_for_multiple_series(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "filtered.csv"
+        path.write_text(
+            "x,y1,y2,note\n"
+            "1,10,100,first\n"
+            "2,20,200,second\n"
+            "3,30,300,third\n"
+            "4,40,400,fourth\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y1", "y2")))
+        browser.canvas.set_data_filter(self._filter("x", 2, 3))
+
+        self.assertEqual(browser.canvas.matched_row_indices, (1, 2))
+        self.assertEqual(
+            tuple(point.row_index for point in browser.canvas.points_by_series["y1"]),
+            (1, 2),
+        )
+        self.assertEqual(
+            tuple(point.row_index for point in browser.canvas.points_by_series["y2"]),
+            (1, 2),
+        )
+        self.assertEqual(browser.canvas.points[0].row[3], "second")
+        self.assertEqual(browser.document.rows[0][3], "first")
+        self.assertIn("Filter: 2/4 rows", browser.status_label.text())
+
+        self.assertTrue(browser.save_format(show_errors=False))
+        restored = session.new_subwindow()
+        self.assertTrue(restored.load_path(path, show_errors=False))
+        self.assertEqual(restored.canvas.data_filter, browser.canvas.data_filter)
+        self.assertEqual(restored.canvas.matched_row_indices, (1, 2))
+
+        browser.canvas.set_data_filter(self._filter("x", 9, 10))
+        self.assertEqual(browser.canvas.matched_row_indices, ())
+        self.assertIn("Filter: 0/4 rows (empty result)", browser.status_label.text())
+
+    def test_filter_reapplies_after_refresh_and_invalid_schema_is_reported(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "live.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        browser.canvas.set_data_filter(self._filter("x", 2, 3))
+        self.assertEqual(browser.monitor_timer.interval(), 5000)
+
+        path.write_text("x,y\n1,10\n2,20\n3,30\n4,40\n", encoding="utf-8")
+        browser._check_for_updates()
+        deadline = time.monotonic() + 2.0
+        while browser._refresh_in_flight and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+        self.application.processEvents()
+        self.assertEqual(browser.canvas.matched_row_indices, (1, 2))
+        self.assertEqual(tuple(point.row_index for point in browser.canvas.points), (1, 2))
+
+        browser.canvas.set_data_filter(self._filter("y", 20, 30))
+        path.write_text("x,z\n1,10\n2,20\n3,30\n4,40\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        self.assertFalse(browser.canvas.data_filter.is_active)
+        self.assertIn("Filter disabled", browser.status_label.text())
+
+    def test_filter_state_is_independent_between_views(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "same.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        first = session.new_subwindow()
+        second = session.new_subwindow()
+        self.assertTrue(first.load_path(path, show_errors=False))
+        self.assertTrue(second.load_path(path, show_errors=False))
+        first.canvas.set_data_filter(self._filter("x", 2, 2))
+        self.assertEqual(tuple(point.row_index for point in first.canvas.points), (1,))
+        self.assertEqual(tuple(point.row_index for point in second.canvas.points), (0, 1, 2))
+
+    def test_noop_missing_filter_columns_are_cleaned_on_refresh_and_plt_apply(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "schema.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        browser.canvas.set_data_filter(
+            self.DataFilter(
+                (
+                    self.DataFilterRow(True, "y"),
+                    self.DataFilterRow(),
+                    self.DataFilterRow(),
+                    self.DataFilterRow(),
+                    self.DataFilterRow(),
+                )
+            )
+        )
+
+        path.write_text("x,z\n1,100\n2,200\n3,300\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        self.assertEqual(browser.canvas.data_filter, self.DataFilter.empty())
+        browser._emit_display_format()
+
+        browser.canvas.apply_plot_format(
+            self.PlotFormat(
+                data_file=path.name,
+                layout="overlay",
+                x_column="x",
+                y_columns=("z",),
+                filters=self.DataFilter(
+                    (
+                        self.DataFilterRow(True, "unknown"),
+                        self.DataFilterRow(),
+                        self.DataFilterRow(),
+                        self.DataFilterRow(),
+                        self.DataFilterRow(),
+                    )
+                ),
+            )
+        )
+        self.assertEqual(browser.canvas.data_filter, self.DataFilter.empty())
+
+    def test_filter_dialog_apply_stays_open_and_rejects_invalid_edits(self) -> None:
+        dialog = self.DataFilterDialog(("x", "y"), self.DataFilter.empty())
+        self.addCleanup(dialog.deleteLater)
+        applied = []
+        dialog.filterApplied.connect(applied.append)
+        self.assertEqual(len(dialog.enabled_checks), 5)
+        self.assertEqual(len(dialog.column_combos), 5)
+
+        dialog.enabled_checks[0].setChecked(True)
+        dialog.column_combos[0].setCurrentIndex(1)
+        dialog.minimum_edits[0].setText("not-a-number")
+        dialog.apply()
+        self.assertEqual(applied, [])
+        self.assertIn("finite number", dialog.error_label.text())
+
+        dialog.minimum_edits[0].setText("1e0")
+        dialog.maximum_edits[0].setText("2")
+        dialog.apply()
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0].rows[0].minimum, 1.0)
+        self.assertEqual(dialog.result(), 0)
+
+        dialog.minimum_edits[0].setText("3")
+        dialog.maximum_edits[0].setText("2")
+        dialog.accept()
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(dialog.result(), 0)
+
+    def test_filter_dialog_rejects_schema_changed_during_apply(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "dialog.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        dialog = self.DataFilterDialog(
+            ("x", "y"),
+            browser.canvas.data_filter,
+            browser,
+            apply_callback=browser._apply_data_filter,
+        )
+        self.addCleanup(dialog.deleteLater)
+        dialog.enabled_checks[0].setChecked(True)
+        dialog.column_combos[0].setCurrentIndex(2)
+        dialog.minimum_edits[0].setText("10")
+
+        path.write_text("x,z\n1,100\n2,200\n3,300\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        dialog.apply()
+        self.assertEqual(dialog.result(), 0)
+        self.assertIn("Filter not applied", dialog.error_label.text())
+        self.assertFalse(browser.canvas.data_filter.is_active)
 
     def test_child_views_share_main_window_and_inherit_recent_format(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -156,6 +382,7 @@ class MdiSessionTests(unittest.TestCase):
         self.assertTrue(first.canvas.set_layout(self.STACKED_LAYOUT))
         self.assertTrue(first.canvas.set_x_scale("log"))
         self.assertTrue(first.canvas.set_y_scale("log"))
+        first.canvas.set_data_filter(self._filter("Timestamp_003", 2, 2))
         self.assertIsNotNone(session.last_display_format)
 
         second = session.new_subwindow()
@@ -175,6 +402,8 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(second.canvas.layout_mode, self.STACKED_LAYOUT)
         self.assertEqual(second.canvas.x_scale, "log")
         self.assertEqual(second.canvas.y_scale, "log")
+        self.assertEqual(second.canvas.data_filter.rows[0].column, "Timestamp_006")
+        self.assertEqual(second.canvas.matched_row_indices, (1,))
 
         third_path = Path(temporary.name) / "sample_009.text"
         third_path.write_text(
@@ -195,6 +424,8 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(third.canvas.layout_mode, self.STACKED_LAYOUT)
         self.assertEqual(third.canvas.x_scale, "log")
         self.assertEqual(third.canvas.y_scale, "log")
+        self.assertFalse(third.canvas.data_filter.is_active)
+        self.assertIn("filters cleared", third.status_label.text())
 
     def test_mdi_area_accepts_dropped_data_files(self) -> None:
         from PySide2.QtCore import QMimeData, QUrl

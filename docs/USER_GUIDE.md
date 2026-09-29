@@ -58,6 +58,28 @@ Each child window has independent import settings and plot state. Use `File >
 New Data View` and open the same file again to create another independent view
 of that file.
 
+## Filter data rows
+
+Choose `Data Filter` in a data view to edit five filter rows. Each row has an
+`Enabled` checkbox, a numeric `Data` column, and inclusive `Min` and `Max`
+bounds. Enabled rows are combined with `AND`; a blank bound is unbounded and a
+row with both bounds blank has no effect. Finite decimal and scientific notation
+values are accepted. `Apply` keeps the dialog open, `OK` applies and closes it,
+`Cancel` discards edits that were not applied, and `Clear` clears the editor.
+
+The status line reports matched rows out of the complete document and the plot
+footer reports the same count. An empty match is shown explicitly. Filtering
+selects original data-row indices shared by all plotted series, so point details
+continue to show the original row and source line. Refresh reapplies the same
+filter; a normal refresh keeps the user zoom, while changing filter settings
+resets zoom. If a refreshed schema removes or makes a filter column nonnumeric,
+that row is disabled and the status line names the affected column.
+
+Filters are saved only by the existing explicit `File > Save PLT` action. New
+PLT files use format version 3. Version 1 and version 2 PLT files load with no
+filters. New data views inherit filter columns by position only when the total
+column count matches; filters are cleared when it differs.
+
 ## Plot settings
 
 Use the plot context menu to select X/Y columns, overlay or stacked/shared-X

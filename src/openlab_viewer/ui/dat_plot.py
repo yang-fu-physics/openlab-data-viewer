@@ -45,6 +45,12 @@ from ..axis_ticks import (
     timestamp_tick_label,
     timestamp_ticks,
 )
+from ..data_filter import (
+    FILTER_ROW_COUNT,
+    DataFilter,
+    DataFilterRow,
+    matching_row_indices,
+)
 from ..data_reader import DatDocument, DatPoint
 from ..plot_format import (
     DisplayFormatTemplate,
@@ -168,6 +174,7 @@ class DatPlotCanvas(QWidget):
     axesChanged = Signal(str, object)
     displayChanged = Signal()
     pointActivated = Signal(object)
+    filterInvalidated = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -181,6 +188,9 @@ class DatPlotCanvas(QWidget):
         self.x_scale = LINEAR_SCALE
         self.y_scale = LINEAR_SCALE
         self.points_by_series: dict[str, tuple[DatPoint, ...]] = {}
+        self.data_filter = DataFilter.empty()
+        self._matched_row_indices: tuple[int, ...] = ()
+        self._matched_row_index_set: frozenset[int] = frozenset()
         self._axes_initialized = False
         self._x_view: tuple[float, float] | None = None
         self._overlay_y_view: tuple[float, float] | None = None
@@ -210,6 +220,33 @@ class DatPlotCanvas(QWidget):
         return self.points_by_series.get(self.y_column or "", ())
 
     @property
+    def filters(self) -> DataFilter:
+        """Compatibility alias for the per-view data-filter state."""
+
+        return self.data_filter
+
+    @property
+    def matched_row_indices(self) -> tuple[int, ...]:
+        """Return the last computed source-row selection."""
+
+        return self._matched_row_indices
+
+    @property
+    def filter_match_count(self) -> int:
+        return len(self._matched_row_indices)
+
+    @property
+    def filter_summary(self) -> str:
+        """Return the user-facing row-count summary for the active view."""
+
+        total = len(self.document.rows) if self.document is not None else 0
+        if not self.data_filter.is_active:
+            return "Filter: off (%d/%d rows)" % (total, total)
+        if not self._matched_row_indices:
+            return "Filter: 0/%d rows (empty result)" % total
+        return "Filter: %d/%d rows" % (len(self._matched_row_indices), total)
+
+    @property
     def _view_range(self) -> tuple[float, float, float, float] | None:
         """Compatibility property returning the active manual view range."""
 
@@ -220,6 +257,12 @@ class DatPlotCanvas(QWidget):
     def set_document(self, document: DatDocument, preserve_view: bool = False) -> None:
         """Replace the snapshot, select numeric columns, and preserve zoom on request."""
 
+        valid_filter, invalid_filter_columns = self.data_filter.disable_invalid_columns(
+            document.columns,
+            document.numeric_columns(),
+        )
+        filter_changed = valid_filter != self.data_filter
+        self.data_filter = valid_filter
         self.document = document
         numeric = document.numeric_columns()
         if not self._axes_initialized or (
@@ -255,12 +298,14 @@ class DatPlotCanvas(QWidget):
         self.y_columns = valid_y
         self._axes_initialized = True
         self._rebuild_points()
-        if not preserve_view:
+        if not preserve_view or filter_changed:
             self.reset_zoom(notify=False)
         else:
             self._discard_invalid_views()
             self.update()
         self._emit_axes_changed()
+        if invalid_filter_columns:
+            self.filterInvalidated.emit(invalid_filter_columns)
 
     def set_axes(
         self,
@@ -295,6 +340,36 @@ class DatPlotCanvas(QWidget):
 
     def set_y_columns(self, y_columns: tuple[str, ...] | list[str]) -> bool:
         return self.set_axes(self.x_column, y_columns)
+
+    def set_data_filter(self, data_filter: DataFilter, *, notify: bool = True) -> bool:
+        """Apply one validated row selection to every plotted series."""
+
+        if not isinstance(data_filter, DataFilter):
+            raise PlotFormatError("Data filter must contain five validated rows")
+        if self.document is not None:
+            invalid = data_filter.active_invalid_columns(
+                self.document.columns,
+                self.document.numeric_columns(),
+            )
+            if invalid:
+                raise PlotFormatError(
+                    "Filter columns are missing or non-numeric: %s"
+                    % ", ".join(invalid)
+                )
+            data_filter, _ = data_filter.disable_invalid_columns(
+                self.document.columns,
+                self.document.numeric_columns(),
+            )
+        changed = self.data_filter != data_filter
+        self.data_filter = data_filter
+        self._rebuild_points()
+        if changed:
+            self.reset_zoom(notify=False)
+        else:
+            self.update()
+        if notify and changed:
+            self.displayChanged.emit()
+        return changed
 
     def toggle_y_column(self, column: str, enabled: bool) -> bool:
         """Toggle one Y series while keeping at least one selected."""
@@ -371,11 +446,24 @@ class DatPlotCanvas(QWidget):
         missing = [name for name in plot_format.y_columns if name not in numeric]
         if missing:
             raise PlotFormatError("Y columns are not available: " + ", ".join(missing))
+        invalid_filters = plot_format.filters.active_invalid_columns(
+            self.document.columns,
+            numeric,
+        )
+        if invalid_filters:
+            raise PlotFormatError(
+                "Filter columns are missing or non-numeric: "
+                + ", ".join(invalid_filters)
+            )
         self.x_column = plot_format.x_column
         self.y_columns = plot_format.y_columns
         self.layout_mode = plot_format.layout
         self.x_scale = plot_format.x_scale
         self.y_scale = plot_format.y_scale
+        self.data_filter, _ = plot_format.filters.disable_invalid_columns(
+            self.document.columns,
+            numeric,
+        )
         self._rebuild_points()
         self._x_view = plot_format.x_range
         self._overlay_y_view = plot_format.overlay_y_range
@@ -409,6 +497,7 @@ class DatPlotCanvas(QWidget):
         self.y_scale = template.plot_format.y_scale
         same_column_count = len(self.document.columns) == template.column_count
         columns_applied = False
+        invalid_filter_columns = []
         if same_column_count:
             numeric = set(self.document.numeric_columns())
 
@@ -437,6 +526,40 @@ class DatPlotCanvas(QWidget):
                 self.x_column = x_column
                 self.y_columns = y_columns
 
+            filter_rows = []
+            if len(template.filter_column_indices) == FILTER_ROW_COUNT:
+                for filter_row, column_index in zip(
+                    template.plot_format.filters.rows,
+                    template.filter_column_indices,
+                ):
+                    if filter_row.column is None:
+                        filter_rows.append(filter_row)
+                        continue
+                    if column_index is None:
+                        if not filter_row.is_noop:
+                            invalid_filter_columns.append(filter_row.column)
+                        filter_rows.append(DataFilterRow())
+                        continue
+                    column = numeric_at(column_index)
+                    if column is None:
+                        if not filter_row.is_noop:
+                            invalid_filter_columns.append(filter_row.column)
+                        filter_rows.append(DataFilterRow())
+                    else:
+                        filter_rows.append(
+                            DataFilterRow(
+                                enabled=filter_row.enabled,
+                                column=column,
+                                minimum=filter_row.minimum,
+                                maximum=filter_row.maximum,
+                            )
+                        )
+                self.data_filter = DataFilter(tuple(filter_rows))
+            else:
+                self.data_filter = DataFilter.empty()
+        else:
+            self.data_filter = DataFilter.empty()
+
         self._rebuild_points()
         if columns_applied:
             self._x_view = template.plot_format.x_range
@@ -464,6 +587,8 @@ class DatPlotCanvas(QWidget):
         self._axes_initialized = True
         self._emit_axes_changed()
         self.update()
+        if invalid_filter_columns:
+            self.filterInvalidated.emit(tuple(dict.fromkeys(invalid_filter_columns)))
         return columns_applied
 
     def to_plot_format(self, data_file: str) -> PlotFormat:
@@ -479,6 +604,7 @@ class DatPlotCanvas(QWidget):
             stacked_y_ranges=dict(self._stacked_y_views),
             x_scale=self.x_scale,
             y_scale=self.y_scale,
+            filters=self.data_filter,
         )
 
     def reset_zoom(self, *, notify: bool = True) -> None:
@@ -523,12 +649,20 @@ class DatPlotCanvas(QWidget):
 
         if self.document is None:
             self.points_by_series = {}
+            self._matched_row_indices = ()
+            self._matched_row_index_set = frozenset()
             self._timestamp_reference = None
             return
+        self._matched_row_indices = matching_row_indices(
+            self.document,
+            self.data_filter,
+        )
+        self._matched_row_index_set = frozenset(self._matched_row_indices)
         self.points_by_series = {
             name: tuple(
                 point
                 for point in self.document.numeric_points(name, self.x_column)
+                if point.row_index in self._matched_row_index_set
                 if math.isfinite(point.x) and math.isfinite(point.y)
             )
             for name in self.y_columns
@@ -780,7 +914,9 @@ class DatPlotCanvas(QWidget):
         if not has_points:
             painter.setPen(QColor("#657080"))
             message = (
-                "No positive points for the selected logarithmic axes"
+                "No rows match the active filters"
+                if self.data_filter.is_active and not self._matched_row_indices
+                else "No positive points for the selected logarithmic axes"
                 if LOG_SCALE in {self.x_scale, self.y_scale}
                 else "No numeric points for the selected axes"
             )
@@ -813,6 +949,7 @@ class DatPlotCanvas(QWidget):
                 footer_height,
             ),
             Qt.AlignRight | Qt.AlignVCenter,
+            f"{len(self._matched_row_indices):,}/{len(self.document.rows):,} rows matched | "
             f"{total:,} plotted points | drag to zoom | double-click a point for details",
         )
 

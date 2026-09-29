@@ -4,6 +4,12 @@ setlocal
 set "VIEWER_ROOT=%~dp0"
 set "PYTHON=%VIEWER_ROOT%.venv-win7\Scripts\python.exe"
 
+rem A preserved conda-style Python 3.8 environment keeps python.exe at its root.
+if not exist "%PYTHON%" if exist "%VIEWER_ROOT%.venv-win7\python.exe" (
+    set "PYTHON=%VIEWER_ROOT%.venv-win7\python.exe"
+    set "PATH=%VIEWER_ROOT%.venv-win7\Library\bin;%PATH%"
+)
+
 if not exist "%PYTHON%" (
     echo Creating the Python 3.8 build environment...
     python -m venv "%VIEWER_ROOT%.venv-win7"

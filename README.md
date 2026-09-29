@@ -27,6 +27,8 @@ OpenLab Control runtime so it can be released as its own executable.
   the import settings dialog.
 - Plot multiple numeric columns in overlay or stacked/shared-X layouts, with
   linear or logarithmic axes and PLT sidecar state.
+- Filter plotted rows with five independent numeric conditions, preserving source
+  row identity and per-view state.
 - Use English labels, dialogs, status messages, and error messages throughout
   the viewer.
 

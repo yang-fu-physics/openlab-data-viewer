@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Tuple
 
+from .data_filter import DataFilter
+
 
 PLOT_FORMAT_MARKER = "OpenLab Control Plot Format"
-PLOT_FORMAT_VERSION = 2
-SUPPORTED_PLOT_FORMAT_VERSIONS = {1, PLOT_FORMAT_VERSION}
+PLOT_FORMAT_VERSION = 3
+SUPPORTED_PLOT_FORMAT_VERSIONS = {1, 2, PLOT_FORMAT_VERSION}
 PLOT_LAYOUTS = {"overlay", "stacked"}
 LINEAR_SCALE = "linear"
 LOG_SCALE = "log"
@@ -60,6 +62,7 @@ class PlotFormat:
     stacked_y_ranges: dict[str, Range] = field(default_factory=dict)
     x_scale: str = LINEAR_SCALE
     y_scale: str = LINEAR_SCALE
+    filters: DataFilter = field(default_factory=DataFilter.empty)
 
     def __post_init__(self) -> None:
         """Apply layout, axis-scale, and range constraints at construction."""
@@ -74,6 +77,8 @@ class PlotFormat:
             raise PlotFormatError(f"Unknown X scale: {self.x_scale}")
         if self.y_scale not in PLOT_SCALES:
             raise PlotFormatError(f"Unknown Y scale: {self.y_scale}")
+        if not isinstance(self.filters, DataFilter):
+            raise PlotFormatError("filters must be a five-row data filter")
         _validated_range(self.x_range, "x_range")
         _validated_range(self.overlay_y_range, "overlay_y_range")
         for name, value in self.stacked_y_ranges.items():
@@ -102,6 +107,7 @@ class PlotFormat:
             "y_axes": list(self.y_columns),
             "x_scale": self.x_scale,
             "y_scale": self.y_scale,
+            "filters": self.filters.to_list(),
             "zoom": {
                 "x_range": list(self.x_range) if self.x_range is not None else None,
                 "overlay_y_range": (
@@ -140,6 +146,15 @@ class PlotFormat:
             for name, raw_range in stacked_raw.items()
             if (value := _validated_range(raw_range, f"stacked_y_ranges.{name}")) is not None
         }
+        if version >= 3:
+            try:
+                filters = DataFilter.from_list(raw["filters"])
+            except KeyError as exc:
+                raise PlotFormatError("filters must be a five-row list") from exc
+            except ValueError as exc:
+                raise PlotFormatError(str(exc)) from exc
+        else:
+            filters = DataFilter.empty()
         return cls(
             data_file=str(raw.get("data_file", "")),
             layout=layout,
@@ -152,6 +167,7 @@ class PlotFormat:
             stacked_y_ranges=stacked,
             x_scale=str(raw.get("x_scale", LINEAR_SCALE)).casefold(),
             y_scale=str(raw.get("y_scale", LINEAR_SCALE)).casefold(),
+            filters=filters,
         )
 
 
@@ -164,6 +180,7 @@ class DisplayFormatTemplate:
     x_column_index: int | None
     y_column_indices: tuple[int, ...]
     stacked_y_ranges: tuple[Range | None, ...] = ()
+    filter_column_indices: tuple[int | None, ...] = ()
 
 
 def plot_format_path(data_path: str | Path, *, exact_name: bool = False) -> Path:
