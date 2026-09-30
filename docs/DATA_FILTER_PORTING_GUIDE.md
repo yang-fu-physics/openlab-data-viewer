@@ -8,11 +8,11 @@ modified.
 
 | Viewer implementation | Parent target | Porting note |
 | --- | --- | --- |
-| `src/openlab_viewer/data_filter.py` | `src/labcontrol/data_filter.py` | Copy the Qt-independent `DataFilterRow`, `DataFilter`, finite-bound validation, schema invalidation, and shared original-row selection. Keep five visible rows independent of either Qt binding; preserve a legacy first-row condition in `overflow_rows` when row zero is reserved for time. |
+| `src/openlab_viewer/data_filter.py` | `src/labcontrol/data_filter.py` | Copy the Qt-independent `DataFilterRow`, `DataFilter`, finite-bound validation, schema invalidation, and shared original-row selection. Keep five visible rows independent of either Qt binding; preserve a legacy first-row condition in `overflow_rows` when row zero is reserved for time. Retain `enabled` only for legacy PLT reads; new matching uses column plus at least one bound. |
 | `src/openlab_viewer/data_reader.py` | `src/labcontrol/dat_reader.py` | Viewer uses `DataDocument`/`DataPoint`, `source_line_numbers`, and configurable custom text formats. Parent uses `DatDocument`/`DatPoint` and OpenLab DAT-only reading. Adapt the selection helper’s document access rather than changing either reader contract. |
 | `src/openlab_viewer/time_filter.py` | `src/labcontrol/time_filter.py` | Keep timestamp/time discovery separate from axis positional matching. Discover names such as `Timestamp_003` only for the fixed filter row; use `axis_ticks.TimestampReference` when a reliable mapping exists, otherwise expose elapsed duration. |
-| `src/openlab_viewer/plot_format.py` | `src/labcontrol/plot_format.py` | Viewer PLT is v4 and stores five `filters` rows plus optional `filter_overflow`; v1/v2 have no filters and v3 loads unchanged five-row filters. Parent’s existing sidecar naming and save policy are different, so port the field validation and explicitly choose the parent compatibility policy. |
-| `src/openlab_viewer/ui/data_filter_dialog.py` | `src/labcontrol/ui/data_filter_dialog.py` | Port the five-row English dialog with an always-visible fixed Time row plus four general rows. The callback must commit only after dialog validation, keep the dialog open when the current schema rejects the candidate, and show the time-row help/disabled state when no time column exists. |
+| `src/openlab_viewer/plot_format.py` | `src/labcontrol/plot_format.py` | Viewer PLT is v5 and stores five `filters` rows plus optional `filter_overflow`; v1/v2 have no filters and v3/v4 retain legacy enable semantics. Parent’s existing sidecar naming and save policy are different, so port the field validation and explicitly choose the parent compatibility policy. |
+| `src/openlab_viewer/ui/data_filter_dialog.py` | `src/labcontrol/ui/data_filter_dialog.py` | Port the five-row English dialog with an always-visible fixed Time row plus four general rows and no Enabled column. The callback must commit only after dialog validation, keep the dialog open when the current schema rejects the candidate, and show the time-row help/unavailable state when no time column exists. |
 | `src/openlab_viewer/ui/dat_plot.py` | `src/labcontrol/ui/dat_plot.py` | Compute one row-index tuple in the document/axis rebuild, filter every selected series by `point.row_index`, and let autoscaling and hit testing consume the rebuilt points. Do not filter in paint or once per series. |
 | `src/openlab_viewer/ui/data_browser.py` | `src/labcontrol/ui/data_browser.py` | Add the Data Filter button, status counts, schema invalidation message, refresh reapplication, and PLT/template handoff. Parent’s browser has no standalone import-options state, so retain the parent’s load path. |
 | `src/openlab_viewer/ui/data_viewer_window.py` | `src/labcontrol/ui/data_viewer_window.py` | Port only if the parent window exposes the same per-view display-template signal. The viewer’s narrow-window child fitting is independent of filtering. |
@@ -55,17 +55,19 @@ stays visible but is disabled with an explanation. `Timestamp_003` and similar
 names are recognized for this dialog only; axis selection and positional
 inheritance keep their existing rules.
 
-If `TimestampReference` supplies a reliable header mapping, the editor displays
-instrument wall time as `YYYY-MM-DD HH:MM[:SS[.fff]]` and converts bounds back to
-raw seconds. The conversion handles midnight crossings. Without a reliable
-mapping, the editor explicitly says elapsed time and accepts seconds or
-`HH:MM:SS`/`days HH:MM:SS`; hours may exceed 24. It does not infer an epoch from
-small values or from an export/end-time header.
+If `TimestampReference` supplies a mapping, the editor uses a clearable
+millisecond date-time picker and converts bounds back to raw seconds. The UI
+identifies the mapping source and displayed timezone as inferred metadata, not
+verified instrument time. The conversion handles midnight crossings. Without
+a reliable mapping, the editor explicitly says elapsed time and accepts seconds
+or `HH:MM:SS`/`days HH:MM:SS`; hours may exceed 24. It does not infer an epoch
+from small values or from an export/end-time header.
 
 Bounds are inclusive. Blank Min means `value <= Max`, blank Max means
-`value >= Min`, and both blank means the row is a no-op. `Min > Max` is an
-English validation error. The parent port should preserve these semantics and
-add conversion tests for both wall-time and elapsed-time documents.
+`value >= Min`, and both blank mean no filtering. A row applies only when its
+column is valid and at least one bound is present. `Min > Max` is an English
+validation error. The parent port should preserve these semantics and add
+conversion tests for both wall-time and elapsed-time documents.
 
 ## PLT and autosave differences
 
@@ -77,9 +79,12 @@ from `_display_changed` and uses its established DAT sidecar lookup. Decide
 whether parent users should retain that automatic save policy; do not silently
 inherit the standalone viewer’s multi-view naming policy.
 
-When porting v3/v4, preserve old v1/v2 reads as no filters and reject malformed
-filter arrays, non-finite bounds, and Min > Max. A direct PLT load should reject
-an enabled bounded filter whose named column is absent/non-numeric, while
+When porting v3/v4/v5, preserve old v1/v2 reads as no filters and reject
+malformed filter arrays, non-finite bounds, and Min > Max. For v3/v4, clear
+disabled rows with bounds while loading so removing the Enabled control cannot
+silently activate an old condition. New v5 saves and templates do not depend on
+the enabled flag. A direct PLT load should reject
+a bounded filter whose named column is absent/non-numeric, while
 clearing unknown no-op selections. When reserving row zero for time, move an
 existing arbitrary first-row condition into an available general row or the
 serialized `filter_overflow` list; never silently discard it. A session display
@@ -92,7 +97,7 @@ Run the viewer’s `tests/test_data_filter.py`, `tests/test_time_filter.py`, PLT
 tests, and PySide2 MDI tests as a behavioral reference. Add equivalent parent
 tests for inclusive bounds, one-sided/empty bounds, wall-time inverse conversion,
 elapsed durations over 24 hours, nonnumeric values, original row identity,
-multiple series, independent views, refresh/schema invalidation, v1/v2/v3/v4
-PLT, and same-count versus different-count template inheritance. Inspect the
-fixed Time row, stale-dialog rejection, and status/footer empty-result message
-after adapting PySide6 APIs.
+multiple series, independent views, refresh/schema invalidation, v1/v2/v3/v4/v5
+PLT, no-Enabled dialog controls, and same-count versus different-count template
+inheritance. Inspect the fixed Time row, stale-dialog rejection, and
+status/footer empty-result message after adapting PySide6 APIs.

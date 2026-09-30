@@ -18,8 +18,8 @@ from .data_filter import DataFilter
 
 
 PLOT_FORMAT_MARKER = "OpenLab Control Plot Format"
-PLOT_FORMAT_VERSION = 4
-SUPPORTED_PLOT_FORMAT_VERSIONS = {1, 2, 3, PLOT_FORMAT_VERSION}
+PLOT_FORMAT_VERSION = 5
+SUPPORTED_PLOT_FORMAT_VERSIONS = {1, 2, 3, 4, PLOT_FORMAT_VERSION}
 PLOT_LAYOUTS = {"overlay", "stacked"}
 LINEAR_SCALE = "linear"
 LOG_SCALE = "log"
@@ -156,6 +156,7 @@ class PlotFormat:
                 filters = DataFilter.from_list(
                     raw["filters"],
                     raw.get("filter_overflow"),
+                    legacy=version < PLOT_FORMAT_VERSION,
                 )
             except KeyError as exc:
                 raise PlotFormatError("filters must be a five-row list") from exc

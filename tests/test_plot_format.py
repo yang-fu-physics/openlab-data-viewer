@@ -21,7 +21,7 @@ from openlab_viewer.data_filter import DataFilter, DataFilterRow  # noqa: E402
 
 
 class PlotFormatTests(unittest.TestCase):
-    def test_v4_round_trip_serializes_five_filter_rows(self) -> None:
+    def test_v5_round_trip_serializes_five_filter_rows(self) -> None:
         settings = PlotFormat(
             data_file="sample.csv",
             layout="overlay",
@@ -38,11 +38,11 @@ class PlotFormatTests(unittest.TestCase):
             ),
         )
         payload = settings.to_dict()
-        self.assertEqual(payload["version"], 4)
+        self.assertEqual(payload["version"], 5)
         self.assertEqual(len(payload["filters"]), 5)
         self.assertEqual(PlotFormat.from_dict(payload), settings)
 
-    def test_v4_preserves_filter_overflow_rows(self) -> None:
+    def test_v5_preserves_filter_overflow_rows(self) -> None:
         settings = PlotFormat(
             data_file="sample.csv",
             layout="overlay",
@@ -54,7 +54,7 @@ class PlotFormatTests(unittest.TestCase):
             ),
         )
         payload = settings.to_dict()
-        self.assertEqual(payload["version"], 4)
+        self.assertEqual(payload["version"], 5)
         self.assertEqual(len(payload["filter_overflow"]), 1)
         self.assertEqual(PlotFormat.from_dict(payload), settings)
 

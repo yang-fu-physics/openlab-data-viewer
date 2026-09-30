@@ -54,7 +54,7 @@ class TimeFilterTests(unittest.TestCase):
             ),
         )
         displayed = format_time_bound(10.25, context)
-        self.assertEqual(displayed, "2026-09-15 00:00:00")
+        self.assertEqual(displayed, "2026-09-15 00:00:00.000")
         self.assertAlmostEqual(parse_time_bound(displayed, context), 10.25)
 
     def test_timestamp_header_mapping_is_used_for_suffix_column(self) -> None:
@@ -70,7 +70,7 @@ class TimeFilterTests(unittest.TestCase):
         self.assertTrue(context.is_wall_time)
         self.assertEqual(
             format_time_bound(101.0, context),
-            "2026-09-15 00:00:00",
+            "2026-09-15 00:00:00.000",
         )
 
     def test_single_and_both_empty_bounds_have_expected_meaning(self) -> None:

@@ -18,7 +18,7 @@ class MdiSessionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide2.QtWidgets import QApplication
+        from PySide2.QtWidgets import QApplication, QCheckBox, QDateTimeEdit
 
         cls.application = QApplication.instance() or QApplication([])
         from openlab_viewer.data_reader import DataFormatOptions
@@ -35,6 +35,8 @@ class MdiSessionTests(unittest.TestCase):
         cls.PlotFormat = PlotFormat
         cls.DataFilterDialog = DataFilterDialog
         cls.STACKED_LAYOUT = STACKED_LAYOUT
+        cls.QCheckBox = QCheckBox
+        cls.QDateTimeEdit = QDateTimeEdit
 
     def _filter(self, column: str, minimum: float | None, maximum: float | None):
         return self.DataFilter(
@@ -198,10 +200,9 @@ class MdiSessionTests(unittest.TestCase):
         self.addCleanup(dialog.deleteLater)
         applied = []
         dialog.filterApplied.connect(applied.append)
-        self.assertEqual(len(dialog.enabled_checks), 5)
         self.assertEqual(len(dialog.column_combos), 5)
+        self.assertEqual(dialog.findChildren(self.QCheckBox), [])
 
-        dialog.enabled_checks[0].setChecked(True)
         dialog.column_combos[0].setCurrentIndex(1)
         dialog.minimum_edits[0].setText("not-a-number")
         dialog.apply()
@@ -248,9 +249,10 @@ class MdiSessionTests(unittest.TestCase):
         applied = []
         dialog.filterApplied.connect(applied.append)
 
-        self.assertEqual(dialog.column_combos[0].currentData(), "Timestamp_003")
-        self.assertFalse(dialog.column_combos[0].isEnabled())
+        self.assertEqual(dialog.time_column_label.text(), "Timestamp_003")
+        self.assertIsNone(dialog.column_combos[0])
         self.assertEqual(len(dialog.column_combos), 5)
+        self.assertEqual(dialog.findChildren(self.QCheckBox), [])
         self.assertTrue(
             any(
                 "elapsed time" in label.text()
@@ -258,7 +260,6 @@ class MdiSessionTests(unittest.TestCase):
             )
         )
 
-        dialog.enabled_checks[0].setChecked(True)
         dialog.time_minimum_edit.setText("")
         dialog.time_maximum_edit.setText("00:00:05.474")
         dialog.apply()
@@ -286,6 +287,43 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(len(applied), before_error)
         self.assertIn("minimum", dialog.error_label.text())
 
+    def test_wall_time_row_uses_clearable_millisecond_datetime_edit(self) -> None:
+        from datetime import datetime
+
+        from openlab_viewer.axis_ticks import TimestampReference
+        from openlab_viewer.time_filter import TimeFilterContext
+
+        context = TimeFilterContext(
+            "Timestamp(s)",
+            TimestampReference(
+                raw_origin=100.0,
+                wall_origin=datetime(2026, 9, 14, 23, 59, 59),
+                zone_label="UTC+08:00",
+                source="test inference",
+            ),
+        )
+        dialog = self.DataFilterDialog(
+            ("Timestamp(s)", "Signal"),
+            self.DataFilter.empty(),
+            time_context=context,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.assertIsInstance(dialog.time_minimum_edit, self.QDateTimeEdit)
+        self.assertEqual(
+            dialog.time_minimum_edit.displayFormat(),
+            "yyyy-MM-dd HH:mm:ss.zzz",
+        )
+        self.assertIn("not verified instrument time", dialog.time_column_label.toolTip())
+        dialog.time_minimum_edit.lineEdit().setText("2026-09-14 23:59:59.500")
+        dialog.time_maximum_edit.lineEdit().clear()
+        applied = []
+        dialog.filterApplied.connect(applied.append)
+        dialog.apply()
+        self.assertAlmostEqual(applied[-1].rows[0].minimum, 100.5)
+        self.assertIsNone(applied[-1].rows[0].maximum)
+        dialog.time_minimum_edit.clear_value()
+        self.assertIsNone(dialog.time_minimum_edit.value())
+
     def test_time_filter_row_is_visible_but_disabled_without_a_time_column(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -304,7 +342,7 @@ class MdiSessionTests(unittest.TestCase):
         )
         self.addCleanup(dialog.deleteLater)
         self.assertIsNone(dialog.column_combos[0])
-        self.assertFalse(dialog.enabled_checks[0].isEnabled())
+        self.assertEqual(dialog.findChildren(self.QCheckBox), [])
         self.assertFalse(dialog.minimum_edits[0].isEnabled())
         self.assertEqual(dialog.time_column_label.text(), "Unavailable")
 
@@ -353,7 +391,6 @@ class MdiSessionTests(unittest.TestCase):
             apply_callback=browser._apply_data_filter,
         )
         self.addCleanup(dialog.deleteLater)
-        dialog.enabled_checks[0].setChecked(True)
         dialog.column_combos[0].setCurrentIndex(2)
         dialog.minimum_edits[0].setText("10")
 
@@ -388,7 +425,6 @@ class MdiSessionTests(unittest.TestCase):
             time_context=browser.canvas.time_filter_context,
         )
         self.addCleanup(dialog.deleteLater)
-        dialog.enabled_checks[1].setChecked(True)
         dialog.column_combos[1].setCurrentIndex(2)
 
         path.write_text("x,z\n1,100\n2,200\n3,300\n", encoding="utf-8")

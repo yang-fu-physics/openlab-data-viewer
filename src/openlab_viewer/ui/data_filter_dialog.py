@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Callable, Sequence
 
-from PySide2.QtCore import Signal
+from PySide2.QtCore import QDateTime, Signal
 from PySide2.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
+    QDateTimeEdit,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -28,15 +28,55 @@ from .scaling import scaled
 from .window_sizing import fit_initial_window_width
 
 
-class TimeBoundEdit(QLineEdit):
-    """A line edit whose displayed value follows the document time semantics."""
+class TimeBoundEdit(QDateTimeEdit):
+    """A clearable wall-time editor with a millisecond display."""
+
+    DISPLAY_FORMAT = "yyyy-MM-dd HH:mm:ss.zzz"
+
+    def __init__(self, context: TimeFilterContext, parent: QWidget | None = None) -> None:
+        if parent is None:
+            super().__init__()
+        else:
+            super().__init__(parent)
+        self.context = context
+        self.setCalendarPopup(True)
+        self.setDisplayFormat(self.DISPLAY_FORMAT)
+        # Qt needs a non-empty special value to avoid restoring a date when the
+        # bound is cleared; the single space is visually blank and parses as
+        # an unbounded value.
+        self.setSpecialValueText(" ")
+        self._empty_value = self.minimumDateTime()
+        self.setDateTime(self._empty_value)
+        self.lineEdit().clear()
+        self.lineEdit().setPlaceholderText("Unbounded")
+        self.lineEdit().setClearButtonEnabled(True)
+
+    def set_value(self, value: float | None) -> None:
+        if value is None:
+            self.setDateTime(self._empty_value)
+            self.lineEdit().clear()
+            return
+        text = format_time_bound(value, self.context)
+        self.setDateTime(QDateTime.fromString(text, self.DISPLAY_FORMAT))
+
+    def clear_value(self) -> None:
+        self.setDateTime(self._empty_value)
+        self.lineEdit().clear()
+
+    def value(self) -> float | None:
+        if self.dateTime() == self._empty_value or not self.lineEdit().text().strip():
+            return None
+        return parse_time_bound(self.lineEdit().text(), self.context)
+
+
+class DurationBoundEdit(QLineEdit):
+    """A clearable elapsed-duration editor."""
 
     def __init__(self, context: TimeFilterContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.context = context
-        self.setPlaceholderText(
-            "Wall time" if context.is_wall_time else "Elapsed duration"
-        )
+        self.setPlaceholderText("Unbounded")
+        self.setClearButtonEnabled(True)
 
     def set_value(self, value: float | None) -> None:
         self.setText("" if value is None else format_time_bound(value, self.context))
@@ -46,7 +86,7 @@ class TimeBoundEdit(QLineEdit):
 
 
 class DataFilterDialog(QDialog):
-    """Edit one fixed time row and four general rows."""
+    """Edit one fixed time row and four general rows without enable toggles."""
 
     filterApplied = Signal(object)
 
@@ -73,21 +113,22 @@ class DataFilterDialog(QDialog):
         hint = QLabel(
             time_context.help_text
             if time_context is not None
-            else "Enabled rows are combined with AND. Blank bounds are unbounded."
+            else (
+                "A row filters when Column and at least one bound are provided. "
+                "Rows are combined with AND; blank bounds are unbounded."
+            )
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
-        grid.setColumnStretch(3, 1)
         grid.addWidget(QLabel("Row"), 0, 0)
-        grid.addWidget(QLabel("Enabled"), 0, 1)
-        grid.addWidget(QLabel("Data"), 0, 2)
-        grid.addWidget(QLabel("Min"), 0, 3)
-        grid.addWidget(QLabel("Max"), 0, 4)
+        grid.addWidget(QLabel("Column"), 0, 1)
+        grid.addWidget(QLabel("Min"), 0, 2)
+        grid.addWidget(QLabel("Max"), 0, 3)
 
-        self.enabled_checks: list[QCheckBox] = []
         self.column_combos: list[QComboBox | None] = []
         self.minimum_edits: list[QLineEdit] = []
         self.maximum_edits: list[QLineEdit] = []
@@ -105,29 +146,16 @@ class DataFilterDialog(QDialog):
                 row_label = str(row_index + 1)
             grid.addWidget(QLabel(row_label), row_index + 1, 0)
 
-            enabled = QCheckBox()
-            enabled.setChecked(row.enabled)
-            enabled.setToolTip("Enable this condition")
-            self.enabled_checks.append(enabled)
-            grid.addWidget(enabled, row_index + 1, 1)
-
             if self._special_time_row and row_index == 0:
-                if time_context.column is None:
-                    column_label = QLabel("Unavailable")
-                    column_label.setStyleSheet("color: #657080;")
-                    self.time_column_label = column_label
-                    grid.addWidget(column_label, row_index + 1, 2)
-                    enabled.setEnabled(False)
-                else:
-                    fixed_column = QComboBox()
-                    fixed_column.addItem(time_context.column, time_context.column)
-                    fixed_column.setEnabled(False)
-                    self.column_combos.append(fixed_column)
-                    grid.addWidget(fixed_column, row_index + 1, 2)
-                if time_context.column is None:
-                    self.column_combos.append(None)
-                minimum = TimeBoundEdit(time_context)
-                maximum = TimeBoundEdit(time_context)
+                column_label = QLabel(
+                    "Unavailable" if time_context.column is None else time_context.column
+                )
+                column_label.setToolTip(time_context.help_text)
+                self.time_column_label = column_label
+                self.column_combos.append(None)
+                grid.addWidget(column_label, row_index + 1, 1)
+                minimum = self._make_time_edit(time_context)
+                maximum = self._make_time_edit(time_context)
                 minimum.set_value(row.minimum)
                 maximum.set_value(row.maximum)
                 self.time_minimum_edit = minimum
@@ -135,10 +163,11 @@ class DataFilterDialog(QDialog):
                 self.minimum_edits.append(minimum)
                 self.maximum_edits.append(maximum)
                 if time_context.column is None:
+                    column_label.setStyleSheet("color: #657080;")
                     minimum.setEnabled(False)
                     maximum.setEnabled(False)
-                grid.addWidget(minimum, row_index + 1, 3)
-                grid.addWidget(maximum, row_index + 1, 4)
+                grid.addWidget(minimum, row_index + 1, 2)
+                grid.addWidget(maximum, row_index + 1, 3)
                 continue
 
             available_columns = tuple(numeric_columns)
@@ -156,21 +185,21 @@ class DataFilterDialog(QDialog):
                 selected_index = column.findData(row.column)
             column.setCurrentIndex(max(0, selected_index))
             self.column_combos.append(column)
-            grid.addWidget(column, row_index + 1, 2)
+            grid.addWidget(column, row_index + 1, 1)
 
             minimum = QLineEdit()
             minimum.setPlaceholderText("Unbounded")
             if row.minimum is not None:
                 minimum.setText("%.15g" % row.minimum)
             self.minimum_edits.append(minimum)
-            grid.addWidget(minimum, row_index + 1, 3)
+            grid.addWidget(minimum, row_index + 1, 2)
 
             maximum = QLineEdit()
             maximum.setPlaceholderText("Unbounded")
             if row.maximum is not None:
                 maximum.setText("%.15g" % row.maximum)
             self.maximum_edits.append(maximum)
-            grid.addWidget(maximum, row_index + 1, 4)
+            grid.addWidget(maximum, row_index + 1, 3)
 
         layout.addLayout(grid)
         self.error_label = QLabel()
@@ -196,6 +225,12 @@ class DataFilterDialog(QDialog):
         self.cancel_button.clicked.connect(self.reject)
         fit_initial_window_width(self, preferred_height=scaled(340))
 
+    @staticmethod
+    def _make_time_edit(context: TimeFilterContext) -> QWidget:
+        if context.is_wall_time:
+            return TimeBoundEdit(context)
+        return DurationBoundEdit(context)
+
     def _bound(self, edit: QLineEdit, label: str, row_number: int) -> float | None:
         text = edit.text().strip()
         if not text:
@@ -212,7 +247,7 @@ class DataFilterDialog(QDialog):
             )
         return value
 
-    def _time_bound(self, edit: TimeBoundEdit, label: str) -> float | None:
+    def _time_bound(self, edit: QLineEdit, label: str) -> float | None:
         try:
             return edit.value()
         except ValueError as exc:
@@ -224,14 +259,19 @@ class DataFilterDialog(QDialog):
             if self._time_context.column is None:
                 rows.append(DataFilterRow())
             else:
-                rows.append(
-                    DataFilterRow(
-                        enabled=self.enabled_checks[0].isChecked(),
-                        column=self._time_context.column,
-                        minimum=self._time_bound(self.time_minimum_edit, "Min"),
-                        maximum=self._time_bound(self.time_maximum_edit, "Max"),
+                minimum = self._time_bound(self.time_minimum_edit, "Min")
+                maximum = self._time_bound(self.time_maximum_edit, "Max")
+                try:
+                    rows.append(
+                        DataFilterRow(
+                            enabled=minimum is not None or maximum is not None,
+                            column=self._time_context.column,
+                            minimum=minimum,
+                            maximum=maximum,
+                        )
                     )
-                )
+                except ValueError as exc:
+                    raise ValueError("Time row: %s" % exc) from exc
             start_index = 1
         else:
             start_index = 0
@@ -249,7 +289,8 @@ class DataFilterDialog(QDialog):
             try:
                 rows.append(
                     DataFilterRow(
-                        enabled=self.enabled_checks[index].isChecked(),
+                        enabled=column is not None
+                        and (minimum is not None or maximum is not None),
                         column=column,
                         minimum=minimum,
                         maximum=maximum,
@@ -293,19 +334,23 @@ class DataFilterDialog(QDialog):
     def clear(self) -> None:
         """Clear the editor; the applied filter changes on Apply or OK."""
 
-        for index, (enabled, column, minimum, maximum) in enumerate(
+        for index, (column, minimum, maximum) in enumerate(
             zip(
-                self.enabled_checks,
                 self.column_combos,
                 self.minimum_edits,
                 self.maximum_edits,
             )
         ):
-            enabled.setChecked(False)
             if column is not None and not (
                 self._special_time_row and index == 0
             ):
                 column.setCurrentIndex(0)
-            minimum.clear()
-            maximum.clear()
+            if isinstance(minimum, QDateTimeEdit):
+                minimum.lineEdit().clear()
+            else:
+                minimum.clear()
+            if isinstance(maximum, QDateTimeEdit):
+                maximum.lineEdit().clear()
+            else:
+                maximum.clear()
         self.error_label.clear()

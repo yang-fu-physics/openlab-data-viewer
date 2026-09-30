@@ -44,9 +44,10 @@ class TimeFilterContext:
             return "No timestamp/time column detected"
         if self.reference is None:
             return "%s (elapsed time; no reliable date mapping)" % self.column
-        return "%s (wall time; %s)" % (
+        return "%s (wall time; %s; inferred from %s)" % (
             self.column,
             self.reference.zone_label,
+            self.reference.source,
         )
 
     @property
@@ -67,9 +68,19 @@ class TimeFilterContext:
             )
         return (
             "Time is the fixed first row for %s. %s Blank Min means <= Max; "
-            "blank Max means >= Min; both blank disable this row. Bounds are "
-            "inclusive."
-            % (self.column, value_help)
+            "blank Max means >= Min; both blank mean no filtering. Bounds are "
+            "inclusive. %s"
+            % (
+                self.column,
+                value_help,
+                (
+                    "The wall-time mapping is inferred from %s in %s and is "
+                    "not verified instrument time."
+                    % (self.reference.source, self.reference.zone_label)
+                    if self.reference is not None
+                    else ""
+                ),
+            )
         )
 
 
@@ -188,7 +199,7 @@ def format_time_bound(value: float, context: TimeFilterContext) -> str:
         wall = context.reference.datetime_at(value)
         text = wall.strftime("%Y-%m-%d %H:%M:%S")
         milliseconds = wall.microsecond // 1_000
-        return text + (".%03d" % milliseconds if milliseconds else "")
+        return text + ".%03d" % milliseconds
 
     sign = "-" if value < 0 else ""
     total_milliseconds = int(round(abs(value) * 1_000.0))

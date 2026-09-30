@@ -58,9 +58,13 @@ class DataFilterRow:
 
     @property
     def is_noop(self) -> bool:
-        """Whether this row changes the selected rows."""
+        """Whether this row changes the selected rows.
 
-        return not self.enabled or self.column is None or not self.has_bounds
+        ``enabled`` remains in the model only for reading old PLT files. New
+        filters are determined by a selected column and at least one bound.
+        """
+
+        return self.column is None or not self.has_bounds
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON representation used by PLT files."""
@@ -148,6 +152,8 @@ class DataFilter:
         cls,
         raw: Any,
         overflow_raw: Any = None,
+        *,
+        legacy: bool = False,
     ) -> "DataFilter":
         """Validate and construct a filter from external JSON data."""
 
@@ -161,9 +167,22 @@ class DataFilter:
             overflow_raw = []
         if not isinstance(overflow_raw, list):
             raise ValueError("filter_overflow must be a list")
+        rows = tuple(DataFilterRow.from_dict(item) for item in raw)
+        overflow_rows = tuple(
+            DataFilterRow.from_dict(item) for item in overflow_raw
+        )
+        if legacy:
+            rows = tuple(
+                row if row.enabled else DataFilterRow()
+                for row in rows
+            )
+            overflow_rows = tuple(
+                row if row.enabled else DataFilterRow()
+                for row in overflow_rows
+            )
         return cls(
-            tuple(DataFilterRow.from_dict(item) for item in raw),
-            tuple(DataFilterRow.from_dict(item) for item in overflow_raw),
+            rows,
+            overflow_rows,
         )
 
     def reserve_time_column(self, time_column: str | None) -> "DataFilter":
