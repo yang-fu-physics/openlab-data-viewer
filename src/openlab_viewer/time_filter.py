@@ -29,6 +29,7 @@ class TimeFilterContext:
 
     column: str | None
     reference: TimestampReference | None = None
+    initial_minimum: float | None = None
 
     @property
     def has_column(self) -> bool:
@@ -69,7 +70,8 @@ class TimeFilterContext:
         return (
             "Time is the fixed first row for %s. %s Blank Min means <= Max; "
             "blank Max means >= Min; both blank mean no filtering. Bounds are "
-            "inclusive. %s"
+            "inclusive. On first use, Min defaults to the first data record "
+            "and Max is blank. %s"
             % (
                 self.column,
                 value_help,
@@ -119,12 +121,26 @@ def _finite_sample(document: Any, column: str) -> float | None:
     return None
 
 
+def _first_record_value(document: Any, column: str) -> float | None:
+    """Return the numeric value from the first parsed data record only."""
+
+    if not document.rows:
+        return None
+    column_index = document.columns.index(column)
+    try:
+        value = float(document.rows[0][column_index])
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def time_filter_context(document: Any) -> TimeFilterContext:
     """Build a time context without guessing an epoch from small values."""
 
     column = discover_time_column(document.columns)
     if column is None:
         return TimeFilterContext(None)
+    initial_minimum = _first_record_value(document, column)
     reference = None
     if _normalized_name(column).startswith("timestamp"):
         reference = timestamp_reference(
@@ -132,7 +148,7 @@ def time_filter_context(document: Any) -> TimeFilterContext:
             "Timestamp(s)",
             _finite_sample(document, column),
         )
-    return TimeFilterContext(column, reference)
+    return TimeFilterContext(column, reference, initial_minimum)
 
 
 def _parse_wall_time(text: str, context: TimeFilterContext) -> float:

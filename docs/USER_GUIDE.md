@@ -76,6 +76,10 @@ reliable mapping exists, it explicitly uses elapsed duration: enter seconds or
 are never guessed to be an epoch. A blank Min means `<= Max`, a blank Max means
 `>= Min`, and both blank mean no filtering; bounds are inclusive. `Min > Max`
 is rejected. General rows accept finite decimal and scientific notation values.
+On first use for a loaded file, Min is prefilled from the first data record of
+the time column, not the header or the whole-column minimum; Max is blank.
+Applied edits, a deliberate clear, and PLT-restored bounds are retained, and a
+5-second refresh does not reset them.
 `Apply` keeps the dialog open, `OK` applies and closes it, `Cancel` discards
 edits that were not applied, and `Clear` clears the editor.
 

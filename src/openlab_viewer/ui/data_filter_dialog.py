@@ -138,6 +138,19 @@ class DataFilterDialog(QDialog):
 
         for row_index in range(FILTER_ROW_COUNT):
             row = current.rows[row_index]
+            if (
+                self._special_time_row
+                and row_index == 0
+                and time_context.column is not None
+                and row.column is None
+                and not row.has_bounds
+                and time_context.initial_minimum is not None
+            ):
+                row = DataFilterRow(
+                    enabled=True,
+                    column=time_context.column,
+                    minimum=time_context.initial_minimum,
+                )
             if self._special_time_row and row_index == 0:
                 row_label = "Time"
             elif self._special_time_row:

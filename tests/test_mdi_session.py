@@ -301,6 +301,7 @@ class MdiSessionTests(unittest.TestCase):
                 zone_label="UTC+08:00",
                 source="test inference",
             ),
+            initial_minimum=100.5,
         )
         dialog = self.DataFilterDialog(
             ("Timestamp(s)", "Signal"),
@@ -314,8 +315,12 @@ class MdiSessionTests(unittest.TestCase):
             "yyyy-MM-dd HH:mm:ss.zzz",
         )
         self.assertIn("not verified instrument time", dialog.time_column_label.toolTip())
-        dialog.time_minimum_edit.lineEdit().setText("2026-09-14 23:59:59.500")
-        dialog.time_maximum_edit.lineEdit().clear()
+        self.assertEqual(
+            dialog.time_minimum_edit.lineEdit().text(),
+            "2026-09-14 23:59:59.500",
+        )
+        self.assertAlmostEqual(dialog.time_minimum_edit.value(), 100.5)
+        self.assertIsNone(dialog.time_maximum_edit.value())
         applied = []
         dialog.filterApplied.connect(applied.append)
         dialog.apply()
@@ -323,6 +328,73 @@ class MdiSessionTests(unittest.TestCase):
         self.assertIsNone(applied[-1].rows[0].maximum)
         dialog.time_minimum_edit.clear_value()
         self.assertIsNone(dialog.time_minimum_edit.value())
+        dialog.apply()
+        self.assertIsNone(applied[-1].rows[0].minimum)
+        reopened = self.DataFilterDialog(
+            ("Timestamp(s)", "Signal"),
+            applied[-1],
+            time_context=context,
+        )
+        self.addCleanup(reopened.deleteLater)
+        self.assertEqual(reopened.time_minimum_edit.lineEdit().text(), "")
+        self.assertIsNone(reopened.time_minimum_edit.value())
+
+    def test_time_filter_minimum_survives_refresh_without_default_reset(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "refresh-time.csv"
+        path.write_text(
+            "Timestamp_003,Signal_003\n"
+            ".848,1\n"
+            "5.474,2\n"
+            "10,3\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        first_dialog = self.DataFilterDialog(
+            browser.document.numeric_columns(),
+            browser.canvas.data_filter,
+            browser,
+            apply_callback=browser._apply_data_filter,
+            time_context=browser.canvas.time_filter_context,
+        )
+        self.addCleanup(first_dialog.deleteLater)
+        self.assertEqual(first_dialog.time_minimum_edit.text(), "00:00:00.848")
+        first_dialog.time_minimum_edit.setText("00:00:05.474")
+        first_dialog.apply()
+        self.assertAlmostEqual(browser.canvas.data_filter.rows[0].minimum, 5.474)
+
+        path.write_text(
+            "Timestamp_003,Signal_003\n"
+            ".848,1\n"
+            "5.474,2\n"
+            "10,3\n"
+            "12,4\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        self.assertAlmostEqual(browser.canvas.data_filter.rows[0].minimum, 5.474)
+        refreshed_dialog = self.DataFilterDialog(
+            browser.document.numeric_columns(),
+            browser.canvas.data_filter,
+            browser,
+            time_context=browser.canvas.time_filter_context,
+        )
+        self.addCleanup(refreshed_dialog.deleteLater)
+        self.assertEqual(
+            refreshed_dialog.time_minimum_edit.text(),
+            "00:00:05.474",
+        )
 
     def test_time_filter_row_is_visible_but_disabled_without_a_time_column(self) -> None:
         temporary = tempfile.TemporaryDirectory()

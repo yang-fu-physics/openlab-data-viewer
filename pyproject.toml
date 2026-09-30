@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openlab-data-viewer"
-version = "0.20.4"
+version = "0.20.5"
 description = "Standalone OpenLab and delimited-text data viewer"
 requires-python = ">=3.8,<3.9"
 dependencies = [

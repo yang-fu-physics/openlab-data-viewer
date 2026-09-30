@@ -49,11 +49,11 @@ format/template emission cannot call `columns.index()` on a removed selection.
 ## Time-row behavior
 
 The viewer always renders five rows. Row zero is labeled `Time` and uses the
-first discovered timestamp/time column as a disabled column selector; rows one
-through four remain general numeric filters. If no such column exists, row zero
-stays visible but is disabled with an explanation. `Timestamp_003` and similar
-names are recognized for this dialog only; axis selection and positional
-inheritance keep their existing rules.
+first discovered timestamp/time column as a fixed label; rows one through four
+remain general numeric filters. If no such column exists, row zero stays
+visible but its editors are disabled with an explanation. `Timestamp_003` and
+similar names are recognized for this dialog only; axis selection and
+positional inheritance keep their existing rules.
 
 If `TimestampReference` supplies a mapping, the editor uses a clearable
 millisecond date-time picker and converts bounds back to raw seconds. The UI
@@ -61,7 +61,12 @@ identifies the mapping source and displayed timezone as inferred metadata, not
 verified instrument time. The conversion handles midnight crossings. Without
 a reliable mapping, the editor explicitly says elapsed time and accepts seconds
 or `HH:MM:SS`/`days HH:MM:SS`; hours may exceed 24. It does not infer an epoch
-from small values or from an export/end-time header.
+from small values or from an export/end-time header. On first use for a loaded
+document, Min is initialized from the first parsed data record in the time
+column, not from a header or the whole-column minimum; Max is blank. The
+initial default is only used when no time bound has been initialized. Applied
+edits, deliberate clears, PLT-restored bounds, and refreshes must preserve the
+existing row state.
 
 Bounds are inclusive. Blank Min means `value <= Max`, blank Max means
 `value >= Min`, and both blank mean no filtering. A row applies only when its
@@ -99,5 +104,6 @@ tests for inclusive bounds, one-sided/empty bounds, wall-time inverse conversion
 elapsed durations over 24 hours, nonnumeric values, original row identity,
 multiple series, independent views, refresh/schema invalidation, v1/v2/v3/v4/v5
 PLT, no-Enabled dialog controls, and same-count versus different-count template
-inheritance. Inspect the fixed Time row, stale-dialog rejection, and
-status/footer empty-result message after adapting PySide6 APIs.
+inheritance. Inspect the fixed Time row, its first-record Min default,
+stale-dialog rejection, and status/footer empty-result message after adapting
+PySide6 APIs.

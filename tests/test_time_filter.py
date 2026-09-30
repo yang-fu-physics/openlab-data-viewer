@@ -40,8 +40,21 @@ class TimeFilterTests(unittest.TestCase):
         self.assertEqual(discover_time_column(document.columns), "Timestamp_003")
         self.assertEqual(context.column, "Timestamp_003")
         self.assertIsNone(context.reference)
+        self.assertEqual(context.initial_minimum, 0.848)
         self.assertEqual(parse_time_bound("26:00:00", context), 26 * 3_600)
         self.assertEqual(format_time_bound(26 * 3_600, context), "26:00:00")
+
+    def test_initial_minimum_uses_first_record_not_column_minimum(self) -> None:
+        document = DataDocument(
+            path=Path("first-record.text"),
+            header_lines=(),
+            columns=("Timestamp_003", "Signal_003"),
+            rows=(("5.474", "1"), (".848", "2"), ("10", "3")),
+            modified_ns=0,
+            size_bytes=0,
+        )
+        context = time_filter_context(document)
+        self.assertEqual(context.initial_minimum, 5.474)
 
     def test_wall_time_conversion_is_inverse_across_midnight(self) -> None:
         context = TimeFilterContext(
