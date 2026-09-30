@@ -10,13 +10,20 @@ from PySide2.QtWidgets import (
     QMainWindow,
     QMdiArea,
     QMdiSubWindow,
+    QLabel,
     QMessageBox,
 )
 
+from .. import __version__
 from ..data_reader import DataFormatOptions
 from ..plot_format import DisplayFormatTemplate
 from .data_browser import DatBrowserWidget
 from .scaling import scaled
+
+
+GITHUB_URL = "https://github.com/yang-fu-physics/openlab-data-viewer"
+LATEST_RELEASE_URL = GITHUB_URL + "/releases/latest"
+AUTHOR_EMAIL = "yfu.physics@gmail.com"
 
 
 class DataViewerMdiArea(QMdiArea):
@@ -307,11 +314,34 @@ class DataViewerWindow(QMainWindow):
         if subwindow is not None:
             subwindow.close()
 
-    def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About OpenLab Data Viewer",
-            "OpenLab Data Viewer\n\n"
-            "A standalone viewer for OpenLab and delimited text data files.\n"
-            "Each data view is an independent subwindow in this application window.",
+    def _about_message_box(self) -> QMessageBox:
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("About OpenLab Data Viewer")
+        message_box.setTextFormat(Qt.RichText)
+        message_box.setText(
+            "<h3>OpenLab Data Viewer</h3>"
+            "<p>A standalone viewer for OpenLab and delimited text data files.<br>"
+            "Each data view is an independent subwindow in this application window.</p>"
+            "<p><b>Version:</b> %s<br>"
+            "<b>Author:</b> yangfu<br>"
+            "<b>Email:</b> <a href=\"mailto:%s\">%s</a><br>"
+            "<b>GitHub:</b> <a href=\"%s\">%s</a><br>"
+            "<a href=\"%s\">Updates / Download latest release</a></p>"
+            % (
+                __version__,
+                AUTHOR_EMAIL,
+                AUTHOR_EMAIL,
+                GITHUB_URL,
+                GITHUB_URL,
+                LATEST_RELEASE_URL,
+            )
         )
+        label = message_box.findChild(QLabel, "qt_msgbox_label")
+        if label is not None:
+            label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            label.setOpenExternalLinks(True)
+        return message_box
+
+    def _show_about(self) -> None:
+        message_box = self._about_message_box()
+        message_box.exec_()

@@ -18,11 +18,13 @@ class MdiSessionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PySide2.QtWidgets import QApplication, QCheckBox, QDateTimeEdit
+        from PySide2.QtCore import Qt
+        from PySide2.QtWidgets import QApplication, QCheckBox, QDateTimeEdit, QLabel
 
         cls.application = QApplication.instance() or QApplication([])
         from openlab_viewer.data_reader import DataFormatOptions
         from openlab_viewer.data_viewer_app import DataViewerSession
+        from openlab_viewer import __version__
         from openlab_viewer.data_filter import DataFilter, DataFilterRow
         from openlab_viewer.plot_format import PlotFormat
         from openlab_viewer.ui.dat_plot import STACKED_LAYOUT
@@ -37,6 +39,9 @@ class MdiSessionTests(unittest.TestCase):
         cls.STACKED_LAYOUT = STACKED_LAYOUT
         cls.QCheckBox = QCheckBox
         cls.QDateTimeEdit = QDateTimeEdit
+        cls.Qt = Qt
+        cls.QLabel = QLabel
+        cls.viewer_version = __version__
 
     def _filter(self, column: str, minimum: float | None, maximum: float | None):
         return self.DataFilter(
@@ -47,6 +52,31 @@ class MdiSessionTests(unittest.TestCase):
                 self.DataFilterRow(),
                 self.DataFilterRow(),
             )
+        )
+
+    def test_about_dialog_contains_dynamic_version_and_external_links(self) -> None:
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        message_box = session.main_window._about_message_box()
+        self.addCleanup(message_box.deleteLater)
+
+        label = message_box.findChild(self.QLabel, "qt_msgbox_label")
+        self.assertIsNotNone(label)
+        self.assertEqual(message_box.textFormat(), self.Qt.RichText)
+        self.assertEqual(label.textFormat(), self.Qt.RichText)
+        self.assertEqual(
+            label.textInteractionFlags(),
+            self.Qt.TextBrowserInteraction,
+        )
+        self.assertTrue(label.openExternalLinks())
+        about_text = label.text()
+        self.assertIn("<b>Version:</b> %s" % self.viewer_version, about_text)
+        self.assertIn("Author:</b> yangfu", about_text)
+        self.assertIn("mailto:yfu.physics@gmail.com", about_text)
+        self.assertIn("https://github.com/yang-fu-physics/openlab-data-viewer", about_text)
+        self.assertIn(
+            "https://github.com/yang-fu-physics/openlab-data-viewer/releases/latest",
+            about_text,
         )
 
     def test_filter_uses_one_original_row_selection_for_multiple_series(self) -> None:
