@@ -317,6 +317,7 @@ class DataViewerWindow(QMainWindow):
     def _about_message_box(self) -> QMessageBox:
         message_box = QMessageBox(self)
         message_box.setWindowTitle("About OpenLab Data Viewer")
+        message_box.setStandardButtons(QMessageBox.Ok)
         message_box.setTextFormat(Qt.RichText)
         message_box.setText(
             "<h3>OpenLab Data Viewer</h3>"

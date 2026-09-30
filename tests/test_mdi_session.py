@@ -19,7 +19,13 @@ class MdiSessionTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide2.QtCore import Qt
-        from PySide2.QtWidgets import QApplication, QCheckBox, QDateTimeEdit, QLabel
+        from PySide2.QtWidgets import (
+            QApplication,
+            QCheckBox,
+            QDateTimeEdit,
+            QLabel,
+            QMessageBox,
+        )
 
         cls.application = QApplication.instance() or QApplication([])
         from openlab_viewer.data_reader import DataFormatOptions
@@ -39,6 +45,7 @@ class MdiSessionTests(unittest.TestCase):
         cls.STACKED_LAYOUT = STACKED_LAYOUT
         cls.QCheckBox = QCheckBox
         cls.QDateTimeEdit = QDateTimeEdit
+        cls.QMessageBox = QMessageBox
         cls.Qt = Qt
         cls.QLabel = QLabel
         cls.viewer_version = __version__
@@ -62,6 +69,7 @@ class MdiSessionTests(unittest.TestCase):
 
         label = message_box.findChild(self.QLabel, "qt_msgbox_label")
         self.assertIsNotNone(label)
+        self.assertEqual(message_box.standardButtons(), self.QMessageBox.Ok)
         self.assertEqual(message_box.textFormat(), self.Qt.RichText)
         self.assertEqual(label.textFormat(), self.Qt.RichText)
         self.assertEqual(
