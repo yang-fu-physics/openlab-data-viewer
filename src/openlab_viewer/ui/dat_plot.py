@@ -9,6 +9,7 @@ silently resetting a user's manual view.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
 from PySide2.QtCore import QPointF, QRectF, Qt, Signal
@@ -193,6 +194,7 @@ class DatPlotCanvas(QWidget):
         self.x_scale = LINEAR_SCALE
         self.y_scale = LINEAR_SCALE
         self.points_by_series: dict[str, tuple[DatPoint, ...]] = {}
+        self._sorted_x_values_by_series: dict[str, tuple[float, ...]] = {}
         self.data_filter = DataFilter.empty()
         self._matched_row_indices: tuple[int, ...] = ()
         self._matched_row_index_set: frozenset[int] = frozenset()
@@ -706,6 +708,7 @@ class DatPlotCanvas(QWidget):
 
         if self.document is None:
             self.points_by_series = {}
+            self._sorted_x_values_by_series = {}
             self._matched_row_indices = ()
             self._matched_row_index_set = frozenset()
             self._timestamp_reference = None
@@ -732,6 +735,14 @@ class DatPlotCanvas(QWidget):
                 if math.isfinite(point.x) and math.isfinite(point.y)
             )
             for name in self.y_columns
+        }
+        self._sorted_x_values_by_series = {
+            name: tuple(point.x for point in points)
+            for name, points in self.points_by_series.items()
+            if all(
+                left.x <= right.x
+                for left, right in zip(points, points[1:])
+            )
         }
         sample_x = next(
             (
@@ -1378,7 +1389,24 @@ class DatPlotCanvas(QWidget):
             ranges = self._ranges(name)
             if ranges is None:
                 continue
-            for point in self.points_by_series.get(name, ()):
+            points = self.points_by_series.get(name, ())
+            x_values = self._sorted_x_values_by_series.get(name)
+            if x_values:
+                radius = scaled_float(12.0)
+                x_low = self._data_x(
+                    max(plot.left(), position.x() - radius),
+                    plot,
+                    ranges,
+                )
+                x_high = self._data_x(
+                    min(plot.right(), position.x() + radius),
+                    plot,
+                    ranges,
+                )
+                start = bisect_left(x_values, min(x_low, x_high))
+                end = bisect_right(x_values, max(x_low, x_high))
+                points = points[start:end]
+            for point in points:
                 screen = self._screen_point(point.x, point.y, plot, ranges)
                 if screen is None:
                     continue
