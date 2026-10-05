@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ from openlab_viewer.data_reader import (  # noqa: E402
     parse_line_ranges,
     read_data,
 )
+import openlab_viewer.data_reader as data_reader  # noqa: E402
 
 
 class DataReaderTests(unittest.TestCase):
@@ -43,6 +45,24 @@ class DataReaderTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(len(read_data(path, options).rows), 3)
+
+    def test_first_line_header_detection_does_not_rescan_large_data_body(self) -> None:
+        content = "x,y\n" + "\n".join(
+            "%d,%d" % (index, index * 2)
+            for index in range(1, 10_001)
+        ) + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.csv"
+            path.write_text(content, encoding="utf-8")
+            with patch.object(
+                data_reader,
+                "_detection_record",
+                wraps=data_reader._detection_record,
+            ) as detection_record:
+                options = detect_data_format(path)
+        self.assertEqual(options.header_line, 1)
+        self.assertEqual(options.data_start_line, 2)
+        self.assertLess(detection_record.call_count, 60)
 
     def test_ambiguous_text_requires_manual_format_settings(self) -> None:
         content = "metadata\none line\nanother line\n"
@@ -92,6 +112,10 @@ class DataReaderTests(unittest.TestCase):
         self.assertEqual(document.rows, (("0", "1.5", "first"), ("1", "2.5", "second")))
         self.assertEqual(document.source_line_numbers, (4, 6))
         self.assertEqual(document.numeric_series("signal", "time"), ((0.0, 1.5), (1.0, 2.5)))
+        self.assertEqual(
+            document.numeric_points_by_series(("signal",), "time")["signal"],
+            document.numeric_points("signal", "time"),
+        )
 
     def test_custom_file_without_header_keeps_first_data_row(self) -> None:
         content = "metadata\n1,2\n3,4\n"

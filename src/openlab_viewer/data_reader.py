@@ -8,6 +8,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable, Sequence
 
 
 class DataReadError(ValueError):
@@ -152,6 +153,43 @@ class DataDocument:
                 )
         return tuple(result)
 
+    def numeric_points_by_series(
+        self,
+        y_columns: Sequence[str],
+        x_column: str | None = None,
+        row_indices: Iterable[int] | None = None,
+    ) -> dict[str, tuple[DataPoint, ...]]:
+        """Build several numeric series in one pass over the source rows."""
+
+        names = tuple(y_columns)
+        x_index = None if x_column is None else self.column_index(x_column)
+        y_indices = tuple(self.column_index(name) for name in names)
+        result = {name: [] for name in names}
+        for row_index, row in enumerate(self.rows):
+            if row_indices is not None and row_index not in row_indices:
+                continue
+            x_value = (
+                float(row_index + 1)
+                if x_index is None
+                else _as_float(row[x_index])
+            )
+            if x_value is None:
+                continue
+            source_line_number = self.source_line_number(row_index)
+            for name, y_index in zip(names, y_indices):
+                y_value = _as_float(row[y_index])
+                if y_value is not None:
+                    result[name].append(
+                        DataPoint(
+                            x_value,
+                            y_value,
+                            row_index,
+                            row,
+                            source_line_number,
+                        )
+                    )
+        return {name: tuple(points) for name, points in result.items()}
+
 
 # Compatibility names make the ported plotting code easy to compare with the
 # original OpenLab Control implementation.
@@ -271,6 +309,39 @@ def detect_data_format(path: str | Path) -> DataFormatOptions | None:
         for line_number, line in enumerate(lines, start=1)
         if line.strip()
     ]
+
+    # The common delimited-file case has its header on the first non-empty
+    # line.  Check that bounded sample before the legacy full scan: the old
+    # candidate search reparsed every data row for every delimiter, which
+    # made opening a multi-megabyte CSV block the GUI for several seconds.
+    if nonempty:
+        line_number, line = nonempty[0]
+        for delimiter in ("tab", "comma", "semicolon", "pipe", "whitespace"):
+            header = _detection_record(line, delimiter)
+            if header is None or len(header) < 2:
+                continue
+            if all(_as_float(value) is not None for value in header):
+                continue
+            records = []
+            for _, candidate_line in nonempty[1:9]:
+                record = _detection_record(candidate_line, delimiter)
+                if record is None or len(record) != len(header):
+                    break
+                records.append(record)
+            numeric_rows = sum(
+                1
+                for record in records
+                if any(_as_float(value) is not None for value in record)
+            )
+            if len(records) >= 3 and numeric_rows >= 3:
+                return DataFormatOptions(
+                    mode="custom",
+                    header_line=line_number,
+                    data_start_line=line_number + 1,
+                    delimiter=delimiter,
+                    encoding="auto",
+                )
+
     best_header = None
     best_data = None
     for delimiter in ("tab", "comma", "semicolon", "pipe", "whitespace"):

@@ -68,11 +68,14 @@ class _DataReadTask(QRunnable):
         path: Path,
         options: DataFormatOptions,
         generation: int,
+        *,
+        allow_unterminated_last_line: bool = False,
     ) -> None:
         super().__init__()
         self.path = path
         self.options = options
         self.generation = generation
+        self.allow_unterminated_last_line = allow_unterminated_last_line
         self.signals = _DataReadSignals()
 
     def run(self) -> None:
@@ -80,7 +83,7 @@ class _DataReadTask(QRunnable):
             document = read_data(
                 self.path,
                 self.options,
-                allow_unterminated_last_line=False,
+                allow_unterminated_last_line=self.allow_unterminated_last_line,
             )
         except (DataReadError, OSError) as exc:
             self.signals.finished.emit(None, exc, self.generation)
@@ -172,6 +175,7 @@ class DatBrowserWidget(QWidget):
         self._read_generation = 0
         self._refresh_in_flight = False
         self._refresh_task: _DataReadTask | None = None
+        self._background_show_errors = False
         self._initial_display_format = initial_display_format
         self._suspend_format_save = False
         self._format_status = ""
@@ -275,7 +279,7 @@ class DatBrowserWidget(QWidget):
         if dialog.exec_() == QDialog.Accepted:
             selected = dialog.selectedFiles()
             if selected:
-                self.load_path(selected[0], show_errors=True)
+                self.load_path(selected[0], show_errors=True, background=True)
 
     def import_settings(self) -> None:
         """Open the format dialog for the current or failed file."""
@@ -358,6 +362,7 @@ class DatBrowserWidget(QWidget):
                     source,
                     show_errors=True,
                     format_options=dialog.format_options(),
+                    background=True,
                     from_import_dialog=True,
                 )
         finally:
@@ -371,6 +376,7 @@ class DatBrowserWidget(QWidget):
         *,
         format_options: DataFormatOptions | None = None,
         automatic: bool = False,
+        background: bool = False,
         from_import_dialog: bool = False,
     ) -> bool:
         """Read a file and commit the new document only after a complete read."""
@@ -379,6 +385,7 @@ class DatBrowserWidget(QWidget):
         if not automatic:
             self._read_generation += 1
             self._refresh_in_flight = False
+            self._background_show_errors = False
         same_file = self.current_path == source and self.document is not None
         selected_options = format_options
         document = None
@@ -400,6 +407,19 @@ class DatBrowserWidget(QWidget):
                             "Unable to determine the format of %s" % source.name
                         )
                         return False
+            if background:
+                self.format_options = selected_options
+                self._pending_import_path = source
+                if self.document is None:
+                    self.current_path = source
+                self.path_label.setText("Loading %s" % source)
+                self.status_label.setText("Reading %s" % source.name)
+                self._start_background_reload(
+                    source,
+                    allow_unterminated_last_line=not automatic,
+                    show_errors=show_errors,
+                )
+                return True
             document = read_data(
                 source,
                 selected_options,
@@ -690,14 +710,27 @@ class DatBrowserWidget(QWidget):
         if signature != self._signature and not self._refresh_in_flight:
             self._start_background_reload()
 
-    def _start_background_reload(self) -> None:
-        if self.current_path is None:
+    def _start_background_reload(
+        self,
+        path: Path | None = None,
+        *,
+        allow_unterminated_last_line: bool = False,
+        show_errors: bool = False,
+    ) -> None:
+        source = path or self.current_path
+        if source is None:
             return
         self._read_generation += 1
         generation = self._read_generation
-        task = _DataReadTask(self.current_path, self.format_options, generation)
+        task = _DataReadTask(
+            source,
+            self.format_options,
+            generation,
+            allow_unterminated_last_line=allow_unterminated_last_line,
+        )
         self._refresh_in_flight = True
         self._refresh_task = task
+        self._background_show_errors = show_errors
         task.signals.finished.connect(self._background_read_finished)
         QThreadPool.globalInstance().start(task)
 
@@ -711,17 +744,22 @@ class DatBrowserWidget(QWidget):
             return
         self._refresh_in_flight = False
         self._refresh_task = None
+        show_errors = self._background_show_errors
+        self._background_show_errors = False
         if error is not None:
-            if self.current_path is not None:
+            source = self.current_path or self._pending_import_path
+            if source is not None:
                 self.status_label.setText(
                     "Waiting for a complete update of %s: %s"
-                    % (self.current_path.name, error)
+                    % (source.name, error)
                 )
+            if show_errors:
+                QMessageBox.warning(self, "Unable to Open Data File", str(error))
             return
         self._commit_document(
             document,
             self.format_options,
-            show_errors=False,
+            show_errors=show_errors,
         )
 
     def _update_status(self, x_label: str, y_columns: object) -> None:
@@ -806,7 +844,7 @@ class DatBrowserWidget(QWidget):
             self.open_paths_callback(paths)
             event.acceptProposedAction()
             return
-        if self.load_path(paths[0], show_errors=True):
+        if self.load_path(paths[0], show_errors=True, background=True):
             event.acceptProposedAction()
         else:
             event.ignore()

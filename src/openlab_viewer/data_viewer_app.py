@@ -40,6 +40,8 @@ class DataViewerSession:
     def new_subwindow(
         self,
         path: str | Path | None = None,
+        *,
+        background: bool = False,
     ) -> DatBrowserWidget:
         """Create a child view using the latest successful import format."""
 
@@ -48,7 +50,7 @@ class DataViewerSession:
             self.last_display_format,
         )
         if path is not None:
-            browser.load_path(path, show_errors=True)
+            browser.load_path(path, show_errors=True, background=background)
         return browser
 
     def open_dialog(self, source_browser: DatBrowserWidget | None) -> None:
@@ -69,6 +71,8 @@ class DataViewerSession:
         self,
         paths: Iterable[str | Path],
         source_browser: DatBrowserWidget | None = None,
+        *,
+        background: bool = True,
     ) -> None:
         selected = tuple(Path(path) for path in paths)
         if not selected:
@@ -79,9 +83,13 @@ class DataViewerSession:
             if source_browser is not None and source_browser.current_path is None
             else self.new_subwindow()
         )
-        target.load_path(selected[0], show_errors=True)
+        target.load_path(
+            selected[0],
+            show_errors=True,
+            background=background,
+        )
         for path in selected[1:]:
-            self.new_subwindow(path)
+            self.new_subwindow(path, background=background)
 
     def _format_changed(self, options: DataFormatOptions) -> None:
         self.last_format_options = options
@@ -141,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     session = DataViewerSession(Path(args.start_directory))
     session.main_window.show()
     if args.data_file:
-        session.open_paths(args.data_file)
+        session.open_paths(args.data_file, background=not args.gui_smoke)
     else:
         session.new_subwindow()
 

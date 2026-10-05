@@ -130,6 +130,79 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(browser.canvas.matched_row_indices, ())
         self.assertIn("Filter: 0/4 rows (empty result)", browser.status_label.text())
 
+    def test_large_linear_plot_keeps_complete_points_but_limits_render_path(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "large.csv"
+        path.write_text(
+            "x,y1,y2\n"
+            + "\n".join(
+                "%d,%d,%d" % (index, index % 1000, (index * 3) % 1000)
+                for index in range(1, 20_001)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y1", "y2")))
+        browser.canvas.resize(800, 500)
+        browser.canvas.show()
+        self.application.processEvents()
+
+        screen_calls = []
+        original_screen_point = browser.canvas._screen_point
+
+        def count_screen_point(*args, **kwargs):
+            screen_calls.append(1)
+            return original_screen_point(*args, **kwargs)
+
+        browser.canvas._screen_point = count_screen_point
+        browser.canvas.grab()
+
+        self.assertEqual(len(browser.canvas.points_by_series["y1"]), 20_000)
+        self.assertEqual(len(browser.canvas.points_by_series["y2"]), 20_000)
+        self.assertLessEqual(
+            len(screen_calls),
+            2 * (int(browser.canvas._plot_rect().width()) + 16),
+        )
+
+    def test_background_initial_load_commits_after_gui_events_can_run(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "background.csv"
+        path.write_text(
+            "x,y\n"
+            + "\n".join("%d,%d" % (index, index) for index in range(1, 10_001))
+            + "\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        events = []
+        from PySide2.QtCore import QTimer
+
+        timer = QTimer()
+        timer.setInterval(1)
+        timer.timeout.connect(lambda: events.append(1))
+        timer.start()
+        self.assertTrue(browser.load_path(path, show_errors=False, background=True))
+        deadline = time.monotonic() + 2.0
+        while browser._refresh_in_flight and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.001)
+        timer.stop()
+        self.application.processEvents()
+
+        self.assertFalse(browser._refresh_in_flight)
+        self.assertEqual(len(browser.document.rows), 10_000)
+        self.assertTrue(events)
+
     def test_filter_reapplies_after_refresh_and_invalid_schema_is_reported(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

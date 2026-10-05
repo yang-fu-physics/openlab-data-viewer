@@ -715,11 +715,20 @@ class DatPlotCanvas(QWidget):
             self.data_filter,
         )
         self._matched_row_index_set = frozenset(self._matched_row_indices)
+        row_indices = (
+            self._matched_row_index_set
+            if self.data_filter.is_active
+            else None
+        )
+        points_by_series = self.document.numeric_points_by_series(
+            self.y_columns,
+            self.x_column,
+            row_indices,
+        )
         self.points_by_series = {
             name: tuple(
                 point
-                for point in self.document.numeric_points(name, self.x_column)
-                if point.row_index in self._matched_row_index_set
+                for point in points_by_series[name]
                 if math.isfinite(point.x) and math.isfinite(point.y)
             )
             for name in self.y_columns
@@ -985,12 +994,18 @@ class DatPlotCanvas(QWidget):
         elif self.layout_mode == OVERLAY_LAYOUT:
             self._draw_legend(painter, panels[0][1])
 
-        total = sum(
-            1
-            for points in self.points_by_series.values()
-            for point in points
-            if self._point_is_plottable(point)
-        )
+        if self.x_scale == LINEAR_SCALE and self.y_scale == LINEAR_SCALE:
+            total = sum(
+                len(points)
+                for points in self.points_by_series.values()
+            )
+        else:
+            total = sum(
+                1
+                for points in self.points_by_series.values()
+                for point in points
+                if self._point_is_plottable(point)
+            )
         footer = panels[-1][1] if panels else self._plot_rect()
         footer_height = max(scaled_float(24), painter.fontMetrics().height())
         footer_top = min(
@@ -1180,14 +1195,35 @@ class DatPlotCanvas(QWidget):
         plot: QRectF,
         ranges: tuple[float, float, float, float],
     ) -> None:
-        stride = max(1, len(points) // 12_000)
+        # This only reduces the rendered path to roughly one point per pixel;
+        # ``points`` remains complete for filtering, source-row indices, and
+        # point-detail hit testing.
+        display_point_budget = max(1, int(plot.width()))
+        stride = max(1, len(points) // display_point_budget)
+        linear_sample = (
+            stride > 1
+            and self.x_scale == LINEAR_SCALE
+            and self.y_scale == LINEAR_SCALE
+        )
+        if linear_sample:
+            point_indices = list(range(0, len(points), stride))
+            if point_indices[-1] != len(points) - 1:
+                point_indices.append(len(points) - 1)
+        else:
+            point_indices = range(len(points))
         path = QPainterPath()
         segment_started = False
-        for index, point in enumerate(points):
+        for index in point_indices:
+            point = points[index]
             if not self._point_is_plottable(point):
                 segment_started = False
                 continue
-            if segment_started and index % stride != 0 and index != len(points) - 1:
+            if (
+                not linear_sample
+                and segment_started
+                and index % stride != 0
+                and index != len(points) - 1
+            ):
                 continue
             screen = self._screen_point(point.x, point.y, plot, ranges)
             if screen is None:
@@ -1199,6 +1235,7 @@ class DatPlotCanvas(QWidget):
                 path.moveTo(screen)
                 segment_started = True
         painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, len(points) <= 3_000)
         painter.setClipRect(plot)
         painter.setPen(QPen(color, 1.45))
         painter.drawPath(path)
