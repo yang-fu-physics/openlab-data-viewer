@@ -13,7 +13,7 @@ modified.
 | `src/openlab_viewer/time_filter.py` | `src/labcontrol/time_filter.py` | Keep timestamp/time discovery separate from axis positional matching. Discover names such as `Timestamp_003` only for the fixed filter row; use `axis_ticks.TimestampReference` when a reliable mapping exists, otherwise expose elapsed duration. |
 | `src/openlab_viewer/plot_format.py` | `src/labcontrol/plot_format.py` | Viewer PLT is v5 and stores five `filters` rows plus optional `filter_overflow`; v1/v2 have no filters and v3/v4 retain legacy enable semantics. Parent’s existing sidecar naming and save policy are different, so port the field validation and explicitly choose the parent compatibility policy. |
 | `src/openlab_viewer/ui/data_filter_dialog.py` | `src/labcontrol/ui/data_filter_dialog.py` | Port the five-row English dialog with an always-visible fixed Time row plus four general rows and no Enabled column. The callback must commit only after dialog validation, keep the dialog open when the current schema rejects the candidate, and show the time-row help/unavailable state when no time column exists. |
-| `src/openlab_viewer/ui/dat_plot.py` | `src/labcontrol/ui/dat_plot.py` | Compute one row-index tuple in the document/axis rebuild, filter every selected series by `point.row_index`, and let autoscaling and hit testing consume the rebuilt points. Do not filter in paint or once per series. |
+| `src/openlab_viewer/ui/dat_plot.py` | `src/labcontrol/ui/dat_plot.py` | Compute one row-index tuple in the document/axis rebuild, filter every selected series by `point.row_index`, and let autoscaling and hit testing consume the rebuilt points. Do not filter in paint or once per series. Keep the double-click selected-point marker local to each canvas; it is not part of PLT state. |
 | `src/openlab_viewer/ui/data_browser.py` | `src/labcontrol/ui/data_browser.py` | Add the Data Filter button, status counts, schema invalidation message, refresh reapplication, and PLT/template handoff. Parent’s browser has no standalone import-options state, so retain the parent’s load path. |
 | `src/openlab_viewer/ui/data_viewer_window.py` | `src/labcontrol/ui/data_viewer_window.py` | Port only if the parent window exposes the same per-view display-template signal. The viewer’s narrow-window child fitting is independent of filtering. |
 
@@ -71,6 +71,16 @@ On the Python 3.8/PySide2 test machine, a temporary 3,202,716-byte,
 199,001 rows, and 0.0350 s for a point hit test. Two cached paths contained
 210,000 vertices each. Two hundred unchanged polls took 0.0051 s total. These
 figures are a reference for this environment, not a Windows 7 guarantee.
+
+Double-clicking a hit point selects it on that child view, emits the existing
+full-row details signal, and draws a high-contrast marker on top of the source
+curve even when the normal large-series markers are hidden. Repaints, zoom,
+scale changes, and resize recompute the marker from the selected point. A
+successful refresh replaces the selected point with the same series and
+original row only when its row index and complete source row still match;
+filtering it out, changing that row, removing its series, or loading another
+file clears the marker. The selection is intentionally transient and is not
+serialized to PLT or shared with another child view.
 
 ## Time-row behavior
 
@@ -132,4 +142,6 @@ multiple series, independent views, refresh/schema invalidation, v1/v2/v3/v4/v5
 PLT, no-Enabled dialog controls, and same-count versus different-count template
 inheritance. Inspect the fixed Time row, its first-record Min default,
 stale-dialog rejection, and status/footer empty-result message after adapting
-PySide6 APIs.
+PySide6 APIs. Exercise double-click marker visibility for a single point,
+large full-point paths, repeated/non-monotonic X, log axes, zoom/resize,
+multi-window isolation, and refresh/filter row reconciliation.

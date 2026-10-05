@@ -211,6 +211,7 @@ class DatPlotCanvas(QWidget):
         self._drag_current: QPointF | None = None
         self._drag_series: str | None = None
         self._timestamp_reference: TimestampReference | None = None
+        self._selected_hit: PlotHit | None = None
 
     @property
     def x_label(self) -> str:
@@ -229,6 +230,12 @@ class DatPlotCanvas(QWidget):
         """Compatibility property returning points for the first Y series."""
 
         return self.points_by_series.get(self.y_column or "", ())
+
+    @property
+    def selected_hit(self) -> PlotHit | None:
+        """Return the point marker owned by this canvas, if any."""
+
+        return self._selected_hit
 
     @property
     def filters(self) -> DataFilter:
@@ -276,6 +283,12 @@ class DatPlotCanvas(QWidget):
     def set_document(self, document: DatDocument, preserve_view: bool = False) -> None:
         """Replace the snapshot, select numeric columns, and preserve zoom on request."""
 
+        previous_document = self.document
+        if (
+            previous_document is not None
+            and previous_document.path != document.path
+        ):
+            self._selected_hit = None
         prepared_filter = self.data_filter.reserve_time_column(
             discover_time_column(document.columns)
         )
@@ -723,6 +736,7 @@ class DatPlotCanvas(QWidget):
             self._matched_row_indices = ()
             self._matched_row_index_set = frozenset()
             self._timestamp_reference = None
+            self._selected_hit = None
             return
         self._matched_row_indices = matching_row_indices(
             self.document,
@@ -768,6 +782,28 @@ class DatPlotCanvas(QWidget):
             self.x_column,
             sample_x,
         )
+        self._reconcile_selected_hit()
+
+    def _reconcile_selected_hit(self) -> None:
+        """Keep a marker only when its source row still identifies the point."""
+
+        selected = self._selected_hit
+        if selected is None:
+            return
+        for point in self.points_by_series.get(selected.series, ()):
+            if (
+                point.row_index == selected.point.row_index
+                and point.row == selected.point.row
+            ):
+                self._selected_hit = PlotHit(selected.series, point)
+                return
+        self._selected_hit = None
+
+    def _select_point(self, hit: PlotHit) -> None:
+        """Select one point for this canvas and schedule its visible marker."""
+
+        self._selected_hit = hit
+        self.update()
 
     def format_x_value(
         self,
@@ -1239,6 +1275,42 @@ class DatPlotCanvas(QWidget):
             color = QColor(PLOT_COLORS[self.y_columns.index(name) % len(PLOT_COLORS)])
             self._draw_series(painter, points, color, plot, ranges)
 
+        selected = self._selected_hit
+        if selected is not None and selected.series in draw_series:
+            color = QColor(
+                PLOT_COLORS[self.y_columns.index(selected.series) % len(PLOT_COLORS)]
+            )
+            self._draw_selected_marker(
+                painter,
+                selected.point,
+                color,
+                plot,
+                ranges,
+            )
+
+    def _draw_selected_marker(
+        self,
+        painter: QPainter,
+        point: DatPoint,
+        color: QColor,
+        plot: QRectF,
+        ranges: tuple[float, float, float, float],
+    ) -> None:
+        """Draw the selected point independently of the normal marker policy."""
+
+        screen = self._screen_point(point.x, point.y, plot, ranges)
+        if screen is None:
+            return
+        painter.save()
+        painter.setClipRect(plot)
+        painter.setPen(QPen(QColor("#1f2937"), scaled_float(2.0)))
+        painter.setBrush(QColor("#ffd166"))
+        painter.drawEllipse(screen, scaled_float(7.0), scaled_float(7.0))
+        painter.setPen(QPen(QColor("#ffffff"), scaled_float(1.2)))
+        painter.setBrush(color)
+        painter.drawEllipse(screen, scaled_float(3.1), scaled_float(3.1))
+        painter.restore()
+
     def _draw_series(
         self,
         painter: QPainter,
@@ -1412,8 +1484,12 @@ class DatPlotCanvas(QWidget):
         """Emit a complete-row hit when the nearest point is double-clicked."""
 
         if event.button() == Qt.LeftButton:
-            hit = self._nearest_point(QPointF(event.pos()))
+            local_position = event.localPos()
+            hit = self._nearest_point(
+                QPointF(local_position.x(), local_position.y())
+            )
             if hit is not None:
+                self._select_point(hit)
                 self.pointActivated.emit(hit)
                 event.accept()
                 return

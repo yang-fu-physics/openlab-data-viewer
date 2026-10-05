@@ -61,6 +61,61 @@ class MdiSessionTests(unittest.TestCase):
             )
         )
 
+    def _double_click_point(self, browser, point):
+        """Exercise the canvas double-click path without opening a modal dialog."""
+
+        from PySide2.QtCore import QEvent, QPointF
+        from PySide2.QtGui import QMouseEvent
+
+        canvas = browser.canvas
+        before = canvas.grab().toImage()
+        plot = canvas._plot_rect()
+        ranges = canvas._ranges(None)
+        self.assertIsNotNone(ranges)
+        position = canvas._screen_point(point.x, point.y, plot, ranges)
+        self.assertIsNotNone(position)
+        self.assertIsNotNone(canvas._nearest_point(QPointF(position)))
+        activated = []
+        canvas.pointActivated.disconnect(browser._show_point_details)
+        canvas.pointActivated.connect(activated.append)
+        try:
+            event = QMouseEvent(
+                QEvent.MouseButtonDblClick,
+                QPointF(position),
+                self.Qt.LeftButton,
+                self.Qt.LeftButton,
+                self.Qt.NoModifier,
+            )
+            self.assertEqual(event.button(), self.Qt.LeftButton)
+            self.assertIsNotNone(
+                canvas._nearest_point(
+                    QPointF(event.localPos().x(), event.localPos().y())
+                ),
+                "event=%s point=%s plot=%s" % (event.localPos(), position, plot),
+            )
+            canvas.mouseDoubleClickEvent(event)
+            self.application.processEvents()
+            after = canvas.grab().toImage()
+        finally:
+            canvas.pointActivated.disconnect(activated.append)
+            canvas.pointActivated.connect(browser._show_point_details)
+
+        device_ratio = max(1.0, float(before.devicePixelRatio()))
+        center_x = int(position.x() * device_ratio)
+        center_y = int(position.y() * device_ratio)
+        changed_pixels = 0
+        for x in range(
+            max(0, center_x - int(10 * device_ratio)),
+            min(before.width(), center_x + int(10 * device_ratio) + 1),
+        ):
+            for y in range(
+                max(0, center_y - int(10 * device_ratio)),
+                min(before.height(), center_y + int(10 * device_ratio) + 1),
+            ):
+                if before.pixel(x, y) != after.pixel(x, y):
+                    changed_pixels += 1
+        return activated, position, changed_pixels
+
     def test_about_dialog_contains_dynamic_version_and_external_links(self) -> None:
         session = self.DataViewerSession(Path("."))
         self.addCleanup(session.main_window.close)
@@ -171,6 +226,150 @@ class MdiSessionTests(unittest.TestCase):
             sorted(path.elementCount() for path in browser.canvas._path_cache.values()),
             [20_000, 20_000],
         )
+
+    def test_double_click_marks_single_and_large_points(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        single_path = Path(temporary.name) / "single.csv"
+        single_path.write_text("x,y\n1,2\n2,3\n3,4\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        single = session.new_subwindow()
+        self.assertTrue(single.load_path(single_path, show_errors=False))
+        self.assertTrue(single.canvas.set_axes("x", ("y",)))
+        single.canvas.resize(800, 500)
+        single.canvas.show()
+        self.application.processEvents()
+        activated, _, changed_pixels = self._double_click_point(
+            single,
+            single.canvas.points[0],
+        )
+        self.assertEqual([hit.row_index for hit in activated], [0])
+        self.assertEqual(single.canvas.selected_hit.row_index, 0)
+        self.assertGreater(changed_pixels, 10)
+
+        dense_path = Path(temporary.name) / "dense.csv"
+        dense_path.write_text(
+            "x,y\n"
+            + "\n".join(
+                "%d,%d" % (index, (index * 17) % 1000)
+                for index in range(1, 4_001)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        dense = session.new_subwindow()
+        self.assertTrue(dense.load_path(dense_path, show_errors=False))
+        self.assertTrue(dense.canvas.set_axes("x", ("y",)))
+        dense.canvas.resize(800, 500)
+        dense.canvas.show()
+        self.application.processEvents()
+        selected = dense.canvas.points[2_000]
+        activated, _, changed_pixels = self._double_click_point(dense, selected)
+        self.assertEqual([hit.row_index for hit in activated], [selected.row_index])
+        self.assertEqual(dense.canvas.selected_hit.row_index, selected.row_index)
+        self.assertGreater(changed_pixels, 10)
+
+    def test_selected_point_is_local_and_reconciles_refresh_and_filter(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "selected.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        first = session.new_subwindow()
+        second = session.new_subwindow()
+        self.assertTrue(first.load_path(path, show_errors=False))
+        self.assertTrue(second.load_path(path, show_errors=False))
+        self.assertTrue(first.canvas.set_axes("x", ("y",)))
+        first.canvas.resize(800, 500)
+        first.canvas.show()
+        self.application.processEvents()
+        self._double_click_point(first, first.canvas.points[1])
+        self.assertEqual(first.canvas.selected_hit.row_index, 1)
+        self.assertIsNone(second.canvas.selected_hit)
+
+        path.write_text(
+            "x,y\n1,10\n2,20\n3,30\n4,40\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            first.load_path(
+                path,
+                show_errors=False,
+                format_options=first.format_options,
+            )
+        )
+        self.assertEqual(first.canvas.selected_hit.row_index, 1)
+        self.assertEqual(first.canvas.selected_hit.row, ("2", "20"))
+
+        first.canvas.set_data_filter(self._filter("x", 3, 4))
+        self.assertIsNone(first.canvas.selected_hit)
+        first.canvas.set_data_filter(self.DataFilter.empty())
+        self._double_click_point(first, first.canvas.points[0])
+        self.assertEqual(first.canvas.selected_hit.row_index, 0)
+
+        path.write_text(
+            "x,y\n1,11\n2,20\n3,30\n4,40\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            first.load_path(
+                path,
+                show_errors=False,
+                format_options=first.format_options,
+            )
+        )
+        self.assertIsNone(first.canvas.selected_hit)
+
+    def test_selected_point_marker_survives_log_repeated_x_and_zoom(self) -> None:
+        from PySide2.QtCore import QPointF
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "selected-log.csv"
+        path.write_text(
+            "x,y\n1,10\n1,20\n2,30\n2,40\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y",)))
+        browser.canvas.set_x_scale("log")
+        browser.canvas.set_y_scale("log")
+        browser.canvas._x_view = (0.9, 2.2)
+        browser.canvas._overlay_y_view = (8.0, 50.0)
+        browser.canvas._manual_view = True
+        browser.canvas.resize(800, 500)
+        browser.canvas.show()
+        self.application.processEvents()
+        selected = browser.canvas.points[1]
+        activated, old_position, changed_pixels = self._double_click_point(
+            browser,
+            selected,
+        )
+        self.assertEqual([hit.row_index for hit in activated], [1])
+        self.assertEqual(browser.canvas.selected_hit.row_index, 1)
+        self.assertGreater(changed_pixels, 10)
+
+        browser.canvas._x_view = (0.99, 1.05)
+        browser.canvas._overlay_y_view = (19.0, 21.0)
+        browser.canvas._path_cache.clear()
+        browser.canvas.update()
+        self.application.processEvents()
+        new_position = browser.canvas._screen_point(
+            selected.x,
+            selected.y,
+            browser.canvas._plot_rect(),
+            browser.canvas._ranges(None),
+        )
+        self.assertNotEqual((old_position.x(), old_position.y()), (new_position.x(), new_position.y()))
+        self.assertEqual(browser.canvas.selected_hit.row_index, 1)
 
     def test_background_initial_load_commits_after_gui_events_can_run(self) -> None:
         temporary = tempfile.TemporaryDirectory()
