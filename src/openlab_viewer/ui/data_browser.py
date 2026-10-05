@@ -57,7 +57,7 @@ from .window_sizing import fit_initial_window_width
 
 
 class _DataReadSignals(QObject):
-    finished = Signal(object, object, int)
+    finished = Signal(object, object, int, object, object)
 
 
 class _DataReadTask(QRunnable):
@@ -66,29 +66,80 @@ class _DataReadTask(QRunnable):
     def __init__(
         self,
         path: Path,
-        options: DataFormatOptions,
+        options: DataFormatOptions | None,
         generation: int,
         *,
         allow_unterminated_last_line: bool = False,
+        retry_detection: bool = False,
     ) -> None:
         super().__init__()
         self.path = path
         self.options = options
         self.generation = generation
         self.allow_unterminated_last_line = allow_unterminated_last_line
+        self.retry_detection = retry_detection
         self.signals = _DataReadSignals()
 
     def run(self) -> None:
+        selected_options = self.options
         try:
+            if selected_options is None:
+                selected_options = detect_data_format(self.path)
+                if selected_options is None:
+                    raise DataReadError(
+                        "Unable to determine the format of %s" % self.path.name
+                    )
             document = read_data(
                 self.path,
-                self.options,
+                selected_options,
                 allow_unterminated_last_line=self.allow_unterminated_last_line,
             )
         except (DataReadError, OSError) as exc:
-            self.signals.finished.emit(None, exc, self.generation)
+            if self.retry_detection and selected_options is not None:
+                try:
+                    detected_options = detect_data_format(self.path)
+                except (DataReadError, OSError):
+                    detected_options = None
+                if (
+                    detected_options is not None
+                    and detected_options != selected_options
+                ):
+                    try:
+                        document = read_data(
+                            self.path,
+                            detected_options,
+                            allow_unterminated_last_line=True,
+                        )
+                    except (DataReadError, OSError) as detected_error:
+                        exc = detected_error
+                    else:
+                        document.numeric_columns()
+                        self.signals.finished.emit(
+                            document,
+                            None,
+                            self.generation,
+                            self.path,
+                            detected_options,
+                        )
+                        return
+            self.signals.finished.emit(
+                None,
+                exc,
+                self.generation,
+                self.path,
+                selected_options,
+            )
             return
-        self.signals.finished.emit(document, None, self.generation)
+        # Populate the immutable document's numeric cache before the GUI
+        # commits it.  The first GUI paint can then reuse parsed values.
+        document.numeric_columns()
+        self.signals.finished.emit(
+            document,
+            None,
+            self.generation,
+            self.path,
+            selected_options,
+        )
 
 
 class PointDetailsDialog(QDialog):
@@ -165,6 +216,8 @@ class DatBrowserWidget(QWidget):
         self.start_directory = Path(start_directory).resolve()
         self.current_path: Path | None = None
         self._pending_import_path: Path | None = None
+        self._pending_read_path: Path | None = None
+        self._pending_read_options: DataFormatOptions | None = None
         self.document: DataDocument | None = None
         self.format_options = (
             initial_format_options
@@ -176,6 +229,7 @@ class DatBrowserWidget(QWidget):
         self._refresh_in_flight = False
         self._refresh_task: _DataReadTask | None = None
         self._background_show_errors = False
+        self._background_allow_import_retry = False
         self._initial_display_format = initial_display_format
         self._suspend_format_save = False
         self._format_status = ""
@@ -386,40 +440,43 @@ class DatBrowserWidget(QWidget):
             self._read_generation += 1
             self._refresh_in_flight = False
             self._background_show_errors = False
+            self._background_allow_import_retry = False
         same_file = self.current_path == source and self.document is not None
         selected_options = format_options
         document = None
         read_error = None
         try:
-            if selected_options is None:
-                if same_file:
-                    selected_options = self.format_options
-                else:
-                    selected_options = detect_data_format(source)
-                    if selected_options is None:
-                        self._pending_import_path = source
-                        if show_errors and self.allow_import:
-                            return self._open_import_dialog(
-                                source,
-                                self.format_options,
-                            )
-                        self.status_label.setText(
-                            "Unable to determine the format of %s" % source.name
-                        )
-                        return False
+            if selected_options is None and same_file:
+                selected_options = self.format_options
             if background:
-                self.format_options = selected_options
                 self._pending_import_path = source
-                if self.document is None:
-                    self.current_path = source
+                self._pending_read_path = source
+                self._pending_read_options = selected_options
                 self.path_label.setText("Loading %s" % source)
                 self.status_label.setText("Reading %s" % source.name)
                 self._start_background_reload(
                     source,
+                    options=selected_options,
                     allow_unterminated_last_line=not automatic,
                     show_errors=show_errors,
+                    retry_detection=(
+                        not automatic and not from_import_dialog
+                    ),
                 )
                 return True
+            if selected_options is None:
+                selected_options = detect_data_format(source)
+                if selected_options is None:
+                    self._pending_import_path = source
+                    if show_errors and self.allow_import:
+                        return self._open_import_dialog(
+                            source,
+                            self.format_options,
+                        )
+                    self.status_label.setText(
+                        "Unable to determine the format of %s" % source.name
+                    )
+                    return False
             document = read_data(
                 source,
                 selected_options,
@@ -714,23 +771,31 @@ class DatBrowserWidget(QWidget):
         self,
         path: Path | None = None,
         *,
+        options: DataFormatOptions | None = None,
         allow_unterminated_last_line: bool = False,
         show_errors: bool = False,
+        retry_detection: bool = False,
     ) -> None:
         source = path or self.current_path
         if source is None:
             return
+        if options is None and path is None:
+            options = self.format_options
         self._read_generation += 1
         generation = self._read_generation
         task = _DataReadTask(
             source,
-            self.format_options,
+            options,
             generation,
             allow_unterminated_last_line=allow_unterminated_last_line,
+            retry_detection=retry_detection,
         )
         self._refresh_in_flight = True
         self._refresh_task = task
+        self._pending_read_path = source
+        self._pending_read_options = options
         self._background_show_errors = show_errors
+        self._background_allow_import_retry = retry_detection
         task.signals.finished.connect(self._background_read_finished)
         QThreadPool.globalInstance().start(task)
 
@@ -739,28 +804,63 @@ class DatBrowserWidget(QWidget):
         document: DataDocument | None,
         error: DataReadError | None,
         generation: int,
+        source: Path,
+        selected_options: DataFormatOptions | None,
     ) -> None:
         if generation != self._read_generation:
             return
         self._refresh_in_flight = False
         self._refresh_task = None
         show_errors = self._background_show_errors
+        allow_import_retry = self._background_allow_import_retry
         self._background_show_errors = False
+        self._background_allow_import_retry = False
         if error is not None:
-            source = self.current_path or self._pending_import_path
-            if source is not None:
+            self._pending_read_path = None
+            self._pending_read_options = None
+            if self.current_path == source and self.document is not None:
                 self.status_label.setText(
                     "Waiting for a complete update of %s: %s"
                     % (source.name, error)
                 )
-            if show_errors:
+            else:
+                if self.current_path is not None:
+                    self.path_label.setText(str(self.current_path))
+                self.status_label.setText(
+                    "Unable to read %s: %s" % (source.name, error)
+                )
+            if (
+                show_errors
+                and self.allow_import
+                and self.current_path != source
+                and allow_import_retry
+            ):
+                self._pending_import_path = source
+                self._open_import_dialog(
+                    source,
+                    selected_options or self.format_options,
+                )
+            elif show_errors:
                 QMessageBox.warning(self, "Unable to Open Data File", str(error))
             return
+        self._pending_read_path = None
+        self._pending_read_options = None
         self._commit_document(
             document,
-            self.format_options,
+            selected_options,
             show_errors=show_errors,
         )
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Invalidate queued reads before the view is destroyed."""
+
+        self._read_generation += 1
+        self._refresh_in_flight = False
+        self._refresh_task = None
+        self._pending_read_path = None
+        self._pending_read_options = None
+        self.monitor_timer.stop()
+        super().closeEvent(event)
 
     def _update_status(self, x_label: str, y_columns: object) -> None:
         if self.document is None:

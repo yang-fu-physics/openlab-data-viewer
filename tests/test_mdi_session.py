@@ -130,7 +130,7 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(browser.canvas.matched_row_indices, ())
         self.assertIn("Filter: 0/4 rows (empty result)", browser.status_label.text())
 
-    def test_large_linear_plot_keeps_complete_points_but_limits_render_path(self) -> None:
+    def test_large_linear_plot_draws_complete_path_but_hides_markers(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         path = Path(temporary.name) / "large.csv"
@@ -154,6 +154,7 @@ class MdiSessionTests(unittest.TestCase):
         self.application.processEvents()
 
         screen_calls = []
+        browser.canvas._path_cache.clear()
         original_screen_point = browser.canvas._screen_point
 
         def count_screen_point(*args, **kwargs):
@@ -165,9 +166,10 @@ class MdiSessionTests(unittest.TestCase):
 
         self.assertEqual(len(browser.canvas.points_by_series["y1"]), 20_000)
         self.assertEqual(len(browser.canvas.points_by_series["y2"]), 20_000)
-        self.assertLessEqual(
-            len(screen_calls),
-            2 * (int(browser.canvas._plot_rect().width()) + 16),
+        self.assertEqual(len(screen_calls), 40_000)
+        self.assertEqual(
+            sorted(path.elementCount() for path in browser.canvas._path_cache.values()),
+            [20_000, 20_000],
         )
 
     def test_background_initial_load_commits_after_gui_events_can_run(self) -> None:
@@ -202,6 +204,215 @@ class MdiSessionTests(unittest.TestCase):
         self.assertFalse(browser._refresh_in_flight)
         self.assertEqual(len(browser.document.rows), 10_000)
         self.assertTrue(events)
+
+    def test_background_new_file_keeps_committed_state_until_read_succeeds(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        first_path = Path(temporary.name) / "first.csv"
+        second_path = Path(temporary.name) / "second.csv"
+        first_path.write_text("x,y\n1,10\n2,20\n", encoding="utf-8")
+        second_path.write_text('x,y\n"1,2\n', encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        first_options = self.DataFormatOptions(
+            mode="custom",
+            header_line=1,
+            data_start_line=2,
+            delimiter="comma",
+            encoding="utf-8",
+        )
+        second_options = self.DataFormatOptions.openlab()
+        self.assertTrue(
+            browser.load_path(
+                first_path,
+                show_errors=False,
+                format_options=first_options,
+            )
+        )
+        self.assertTrue(
+            browser.load_path(
+                second_path,
+                show_errors=False,
+                format_options=second_options,
+                background=True,
+            )
+        )
+        self.assertEqual(browser.current_path, first_path.resolve())
+        self.assertEqual(browser.format_options, first_options)
+        deadline = time.monotonic() + 2.0
+        while browser._refresh_in_flight and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.001)
+        self.application.processEvents()
+        self.assertEqual(browser.current_path, first_path.resolve())
+        self.assertEqual(browser.format_options, first_options)
+        self.assertIn(second_path.name, browser.status_label.text())
+
+        second_path.write_text("x;y\n1;100\n2;200\n3;300\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                second_path,
+                show_errors=False,
+                format_options=second_options,
+                background=True,
+            )
+        )
+        deadline = time.monotonic() + 2.0
+        while browser._refresh_in_flight and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.001)
+        self.application.processEvents()
+        self.assertEqual(browser.current_path, second_path.resolve())
+        self.assertEqual(browser.format_options.mode, "custom")
+        self.assertEqual(browser.format_options.delimiter, "semicolon")
+
+    def test_late_background_read_cannot_replace_a_newer_file(self) -> None:
+        from unittest.mock import patch
+
+        import openlab_viewer.ui.data_browser as data_browser
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        slow_path = Path(temporary.name) / "slow.csv"
+        fast_path = Path(temporary.name) / "fast.csv"
+        slow_path.write_text("x,y\n1,10\n2,20\n", encoding="utf-8")
+        fast_path.write_text("x,y\n3,30\n4,40\n", encoding="utf-8")
+        options = self.DataFormatOptions(
+            mode="custom",
+            header_line=1,
+            data_start_line=2,
+            delimiter="comma",
+            encoding="utf-8",
+        )
+        original_read_data = data_browser.read_data
+
+        def delayed_read(path, selected_options, **kwargs):
+            if Path(path).name == slow_path.name:
+                time.sleep(0.1)
+            return original_read_data(path, selected_options, **kwargs)
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        with patch.object(data_browser, "read_data", side_effect=delayed_read):
+            self.assertTrue(
+                browser.load_path(
+                    slow_path,
+                    show_errors=False,
+                    format_options=options,
+                    background=True,
+                )
+            )
+            time.sleep(0.02)
+            self.assertTrue(
+                browser.load_path(
+                    fast_path,
+                    show_errors=False,
+                    format_options=options,
+                    background=True,
+                )
+            )
+            deadline = time.monotonic() + 2.0
+            while browser._refresh_in_flight and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(0.001)
+            time.sleep(0.15)
+            self.application.processEvents()
+        self.assertEqual(browser.current_path, fast_path.resolve())
+        self.assertEqual(tuple(row[0] for row in browser.document.rows), ("3", "4"))
+
+    def test_point_hit_testing_matches_brute_force_for_nonmonotonic_repeated_and_log_x(self) -> None:
+        from PySide2.QtCore import QPointF
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "hit.csv"
+        path.write_text(
+            "x,y\n10,100\n1,10\n8,80\n3,30\n1,20\n2,40\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y",)))
+        browser.canvas.resize(800, 500)
+        browser.canvas.show()
+        self.application.processEvents()
+
+        def assert_hits_match_bruteforce() -> None:
+            plot = browser.canvas._plot_rect()
+            ranges = browser.canvas._ranges(None)
+            self.assertIsNotNone(ranges)
+            for point in browser.canvas.points:
+                position = browser.canvas._screen_point(point.x, point.y, plot, ranges)
+                self.assertIsNotNone(position)
+                expected = min(
+                    browser.canvas.points,
+                    key=lambda candidate: (
+                        browser.canvas._screen_point(
+                            candidate.x,
+                            candidate.y,
+                            plot,
+                            ranges,
+                        ).x()
+                        - position.x()
+                    )
+                    ** 2
+                    + (
+                        browser.canvas._screen_point(
+                            candidate.x,
+                            candidate.y,
+                            plot,
+                            ranges,
+                        ).y()
+                        - position.y()
+                    )
+                    ** 2,
+                )
+                hit = browser.canvas._nearest_point(QPointF(position))
+                self.assertIsNotNone(hit)
+                self.assertEqual(hit.row_index, expected.row_index)
+
+        assert_hits_match_bruteforce()
+        self.assertEqual(
+            browser.canvas._sorted_x_values_by_series,
+            {},
+        )
+
+        browser.canvas.set_x_scale("log")
+        browser.canvas.set_y_scale("log")
+        browser.canvas._x_view = (0.9, 11.0)
+        browser.canvas._overlay_y_view = (8.0, 120.0)
+        browser.canvas._manual_view = True
+        browser.canvas._path_cache.clear()
+        browser.canvas.grab()
+        self.assertEqual(
+            [path.elementCount() for path in browser.canvas._path_cache.values()],
+            [6],
+        )
+        assert_hits_match_bruteforce()
+
+        path.write_text(
+            "x,y\n1,10\n1,20\n2,30\n2,40\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        browser.canvas.set_x_scale("log")
+        browser.canvas.set_y_scale("log")
+        browser.canvas._x_view = (0.9, 2.2)
+        browser.canvas._overlay_y_view = (8.0, 50.0)
+        browser.canvas._manual_view = True
+        assert_hits_match_bruteforce()
 
     def test_filter_reapplies_after_refresh_and_invalid_schema_is_reported(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -825,8 +1036,14 @@ class MdiSessionTests(unittest.TestCase):
         area.dropEvent(event)
         self.assertTrue(event.accepted)
         self.assertEqual(len(area.subWindowList()), 1)
+        browser = area.subWindowList()[0].widget()
+        deadline = time.monotonic() + 2.0
+        while browser._refresh_in_flight and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.001)
+        self.application.processEvents()
         self.assertEqual(
-            area.subWindowList()[0].widget().current_path,
+            browser.current_path,
             path.resolve(),
         )
 

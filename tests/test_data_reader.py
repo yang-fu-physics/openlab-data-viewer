@@ -64,6 +64,28 @@ class DataReaderTests(unittest.TestCase):
         self.assertEqual(options.data_start_line, 2)
         self.assertLess(detection_record.call_count, 60)
 
+    def test_first_line_fast_detection_rejects_a_mismatched_sample_row(self) -> None:
+        content = (
+            "x,y\n"
+            "1,2\n"
+            "3,4\n"
+            "5,6\n"
+            "malformed\n"
+            + "\n".join("%d,%d" % (index, index * 2) for index in range(7, 30))
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mixed.csv"
+            path.write_text(content, encoding="utf-8")
+            with patch.object(
+                data_reader,
+                "_detection_record",
+                wraps=data_reader._detection_record,
+            ) as detection_record:
+                options = detect_data_format(path)
+        self.assertEqual(options.header_line, 1)
+        self.assertGreater(detection_record.call_count, 20)
+
     def test_ambiguous_text_requires_manual_format_settings(self) -> None:
         content = "metadata\none line\nanother line\n"
         with tempfile.TemporaryDirectory() as directory:

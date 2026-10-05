@@ -308,11 +308,16 @@ def matching_row_indices(document: Any, data_filter: DataFilter) -> tuple[int, .
     if not conditions:
         return tuple(range(len(rows)))
 
+    condition_values = tuple(
+        document.numeric_values(columns[column_index])
+        for column_index, _, _ in conditions
+    )
+
     matches = []
     for row_index, row in enumerate(rows):
         matches_row = True
-        for column_index, minimum, maximum in conditions:
-            value = _as_finite_float(row[column_index])
+        for values, (_, minimum, maximum) in zip(condition_values, conditions):
+            value = values[row_index]
             if value is None:
                 matches_row = False
                 break

@@ -98,6 +98,18 @@ class DataDocument:
     size_bytes: int
     source_line_numbers: tuple[int, ...] = ()
     format_options: DataFormatOptions = field(default_factory=DataFormatOptions.openlab)
+    _numeric_values_cache: dict[int, tuple[float | None, ...]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _numeric_columns_cache: tuple[str, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def column_index(self, name: str) -> int:
         try:
@@ -111,11 +123,25 @@ class DataDocument:
         return row_index + 1
 
     def numeric_columns(self) -> tuple[str, ...]:
+        if self._numeric_columns_cache is not None:
+            return self._numeric_columns_cache
         result = []
         for index, name in enumerate(self.columns):
-            if any(_as_float(row[index]) is not None for row in self.rows):
+            if any(value is not None for value in self.numeric_values(name)):
                 result.append(name)
-        return tuple(result)
+        result = tuple(result)
+        object.__setattr__(self, "_numeric_columns_cache", result)
+        return result
+
+    def numeric_values(self, name: str) -> tuple[float | None, ...]:
+        """Return cached finite numeric values for one source column."""
+
+        index = self.column_index(name)
+        values = self._numeric_values_cache.get(index)
+        if values is None:
+            values = tuple(_as_float(row[index]) for row in self.rows)
+            self._numeric_values_cache[index] = values
+        return values
 
     def numeric_series(
         self,
@@ -131,16 +157,14 @@ class DataDocument:
     ) -> tuple[DataPoint, ...]:
         y_index = self.column_index(y_column)
         x_index = None if x_column is None else self.column_index(x_column)
+        y_values = self.numeric_values(y_column)
+        x_values = None if x_column is None else self.numeric_values(x_column)
         result = []
         for row_index, row in enumerate(self.rows):
-            y_value = _as_float(row[y_index])
+            y_value = y_values[row_index]
             if y_value is None:
                 continue
-            x_value = (
-                float(row_index + 1)
-                if x_index is None
-                else _as_float(row[x_index])
-            )
+            x_value = float(row_index + 1) if x_index is None else x_values[row_index]
             if x_value is not None:
                 result.append(
                     DataPoint(
@@ -163,21 +187,18 @@ class DataDocument:
 
         names = tuple(y_columns)
         x_index = None if x_column is None else self.column_index(x_column)
-        y_indices = tuple(self.column_index(name) for name in names)
+        y_values = tuple(self.numeric_values(name) for name in names)
+        x_values = None if x_column is None else self.numeric_values(x_column)
         result = {name: [] for name in names}
         for row_index, row in enumerate(self.rows):
             if row_indices is not None and row_index not in row_indices:
                 continue
-            x_value = (
-                float(row_index + 1)
-                if x_index is None
-                else _as_float(row[x_index])
-            )
+            x_value = float(row_index + 1) if x_index is None else x_values[row_index]
             if x_value is None:
                 continue
             source_line_number = self.source_line_number(row_index)
-            for name, y_index in zip(names, y_indices):
-                y_value = _as_float(row[y_index])
+            for name, values in zip(names, y_values):
+                y_value = values[row_index]
                 if y_value is not None:
                     result[name].append(
                         DataPoint(
@@ -323,9 +344,11 @@ def detect_data_format(path: str | Path) -> DataFormatOptions | None:
             if all(_as_float(value) is not None for value in header):
                 continue
             records = []
+            sample_is_consistent = True
             for _, candidate_line in nonempty[1:9]:
                 record = _detection_record(candidate_line, delimiter)
                 if record is None or len(record) != len(header):
+                    sample_is_consistent = False
                     break
                 records.append(record)
             numeric_rows = sum(
@@ -333,7 +356,7 @@ def detect_data_format(path: str | Path) -> DataFormatOptions | None:
                 for record in records
                 if any(_as_float(value) is not None for value in record)
             )
-            if len(records) >= 3 and numeric_rows >= 3:
+            if sample_is_consistent and len(records) >= 3 and numeric_rows >= 3:
                 return DataFormatOptions(
                     mode="custom",
                     header_line=line_number,

@@ -195,6 +195,10 @@ class DatPlotCanvas(QWidget):
         self.y_scale = LINEAR_SCALE
         self.points_by_series: dict[str, tuple[DatPoint, ...]] = {}
         self._sorted_x_values_by_series: dict[str, tuple[float, ...]] = {}
+        self._path_cache: dict[tuple[object, ...], QPainterPath] = {}
+        self._natural_range_cache: dict[
+            tuple[object, ...], tuple[float, float] | None
+        ] = {}
         self.data_filter = DataFilter.empty()
         self._matched_row_indices: tuple[int, ...] = ()
         self._matched_row_index_set: frozenset[int] = frozenset()
@@ -437,6 +441,8 @@ class DatPlotCanvas(QWidget):
         if not changed:
             return True
         setattr(self, attribute, normalized)
+        self._path_cache.clear()
+        self._natural_range_cache.clear()
         self.reset_zoom(notify=False)
         self.update()
         if notify:
@@ -451,6 +457,8 @@ class DatPlotCanvas(QWidget):
             return False
         changed = normalized != self.layout_mode
         self.layout_mode = normalized
+        self._path_cache.clear()
+        self._natural_range_cache.clear()
         self.update()
         if notify and changed:
             self.displayChanged.emit()
@@ -680,6 +688,7 @@ class DatPlotCanvas(QWidget):
         self._overlay_y_view = None
         self._stacked_y_views = {}
         self._manual_view = False
+        self._path_cache.clear()
         self.update()
         if notify and changed:
             self.displayChanged.emit()
@@ -706,6 +715,8 @@ class DatPlotCanvas(QWidget):
     def _rebuild_points(self) -> None:
         """Rebuild finite numeric points for each selected series."""
 
+        self._path_cache.clear()
+        self._natural_range_cache.clear()
         if self.document is None:
             self.points_by_series = {}
             self._sorted_x_values_by_series = {}
@@ -811,15 +822,37 @@ class DatPlotCanvas(QWidget):
         )
 
     def _natural_x_range(self) -> tuple[float, float] | None:
+        key = (
+            "x",
+            self.x_scale,
+            tuple((name, id(points)) for name, points in self.points_by_series.items()),
+        )
+        if key in self._natural_range_cache:
+            return self._natural_range_cache[key]
         values = [
             point.x
             for points in self.points_by_series.values()
             for point in points
             if self._point_is_plottable(point)
         ]
-        return self._padded_range(values, 0.035, self.x_scale)
+        result = self._padded_range(values, 0.035, self.x_scale)
+        self._natural_range_cache[key] = result
+        return result
 
     def _natural_y_range(self, series: str | None) -> tuple[float, float] | None:
+        point_sets = tuple(
+            (name, id(values))
+            for name, values in self.points_by_series.items()
+        )
+        key = (
+            "y",
+            self.layout_mode,
+            self.y_scale,
+            series,
+            point_sets,
+        )
+        if key in self._natural_range_cache:
+            return self._natural_range_cache[key]
         if self.layout_mode == OVERLAY_LAYOUT:
             values = [
                 point.y
@@ -833,7 +866,9 @@ class DatPlotCanvas(QWidget):
                 for point in self.points_by_series.get(series or "", ())
                 if self._point_is_plottable(point)
             ]
-        return self._padded_range(values, 0.06, self.y_scale)
+        result = self._padded_range(values, 0.06, self.y_scale)
+        self._natural_range_cache[key] = result
+        return result
 
     def _ranges(self, series: str | None = None) -> tuple[float, float, float, float] | None:
         """Combine manual and natural ranges for one plot panel."""
@@ -957,6 +992,12 @@ class DatPlotCanvas(QWidget):
                 math.log10(y_min) + fraction * (math.log10(y_max) - math.log10(y_min))
             )
         return y_min + fraction * (y_max - y_min)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Drop geometry-dependent paths when the canvas is resized."""
+
+        self._path_cache.clear()
+        super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -1206,45 +1247,24 @@ class DatPlotCanvas(QWidget):
         plot: QRectF,
         ranges: tuple[float, float, float, float],
     ) -> None:
-        # This only reduces the rendered path to roughly one point per pixel;
-        # ``points`` remains complete for filtering, source-row indices, and
-        # point-detail hit testing.
-        display_point_budget = max(1, int(plot.width()))
-        stride = max(1, len(points) // display_point_budget)
-        linear_sample = (
-            stride > 1
-            and self.x_scale == LINEAR_SCALE
-            and self.y_scale == LINEAR_SCALE
+        # The path always contains every finite, plottable source point.  Only
+        # the marker layer is hidden for large series; path sampling would
+        # lose spikes, repeated X values, and zoomed-in detail.
+        cache_key = (
+            id(points),
+            self.x_scale,
+            self.y_scale,
+            tuple(float(value) for value in ranges),
+            float(plot.left()),
+            float(plot.top()),
+            float(plot.width()),
+            float(plot.height()),
+            float(self.devicePixelRatioF()),
         )
-        if linear_sample:
-            point_indices = list(range(0, len(points), stride))
-            if point_indices[-1] != len(points) - 1:
-                point_indices.append(len(points) - 1)
-        else:
-            point_indices = range(len(points))
-        path = QPainterPath()
-        segment_started = False
-        for index in point_indices:
-            point = points[index]
-            if not self._point_is_plottable(point):
-                segment_started = False
-                continue
-            if (
-                not linear_sample
-                and segment_started
-                and index % stride != 0
-                and index != len(points) - 1
-            ):
-                continue
-            screen = self._screen_point(point.x, point.y, plot, ranges)
-            if screen is None:
-                segment_started = False
-                continue
-            if segment_started:
-                path.lineTo(screen)
-            else:
-                path.moveTo(screen)
-                segment_started = True
+        path = self._path_cache.get(cache_key)
+        if path is None:
+            path = self._build_series_path(points, plot, ranges)
+            self._path_cache[cache_key] = path
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, len(points) <= 3_000)
         painter.setClipRect(plot)
@@ -1258,6 +1278,31 @@ class DatPlotCanvas(QWidget):
                 if screen is not None:
                     painter.drawEllipse(screen, scaled_float(2.1), scaled_float(2.1))
         painter.restore()
+
+    def _build_series_path(
+        self,
+        points: tuple[DatPoint, ...],
+        plot: QRectF,
+        ranges: tuple[float, float, float, float],
+    ) -> QPainterPath:
+        """Build a complete plotted path without display-only point loss."""
+
+        path = QPainterPath()
+        segment_started = False
+        for point in points:
+            if not self._point_is_plottable(point):
+                segment_started = False
+                continue
+            screen = self._screen_point(point.x, point.y, plot, ranges)
+            if screen is None:
+                segment_started = False
+                continue
+            if segment_started:
+                path.lineTo(screen)
+            else:
+                path.moveTo(screen)
+                segment_started = True
+        return path
 
     def _draw_legend(self, painter: QPainter, plot: QRectF) -> None:
         cursor_x = plot.left() + scaled_float(8)
@@ -1356,6 +1401,7 @@ class DatPlotCanvas(QWidget):
                 elif series is not None:
                     self._stacked_y_views[series] = y_range
                 self._manual_view = True
+                self._path_cache.clear()
                 self.displayChanged.emit()
             self.update()
             event.accept()

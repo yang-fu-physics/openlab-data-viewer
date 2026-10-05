@@ -46,6 +46,32 @@ filter with the candidate and reject stale column selections visibly instead of
 reporting a false success. Invalid no-op columns are still cleared so display
 format/template emission cannot call `columns.index()` on a removed selection.
 
+Background file reads carry their source path and format options with the task.
+Until a task succeeds, the committed document, path, and import options remain
+unchanged; a failed new-file request remains the pending target for Import
+Settings, while an automatic refresh reports a transient-read error against the
+currently committed file. A newer request invalidates an older result, and a
+closed view invalidates all queued results. Initial format detection and the
+existing automatic import-format retry run in the worker as well.
+
+The plot retains every finite source point in its path, including log-scale
+paths. Series larger than 3,000 points hide only the individual marker layer;
+that threshold is not a path downsampling rule. Cached full paths and natural
+ranges are keyed by the immutable point set, axes/scales, data ranges, plot
+geometry, and device-pixel ratio; rebuilds, filtering, zoom, scale/layout
+changes, and resize invalidate the affected cache. Numeric column conversion is
+cached on the immutable document and warmed by the background reader. This
+keeps spikes, repeated or non-monotonic X values, original row identity, and
+zoomed-in detail intact while avoiding repeated conversion/path construction.
+
+On the Python 3.8/PySide2 test machine, a temporary 3,202,716-byte,
+210,000-row, two-Y CSV measured a 0.0003 s background scheduling return,
+1.0771 s until the initial commit, 1.1211 s for the first full-path render,
+1.3789 s after one appended row, 0.6611 s to apply an X filter selecting
+199,001 rows, and 0.0350 s for a point hit test. Two cached paths contained
+210,000 vertices each. Two hundred unchanged polls took 0.0051 s total. These
+figures are a reference for this environment, not a Windows 7 guarantee.
+
 ## Time-row behavior
 
 The viewer always renders five rows. Row zero is labeled `Time` and uses the
