@@ -1,3 +1,3 @@
 """Standalone OpenLab Data Viewer package."""
 
-__version__ = "0.20.11"
+__version__ = "0.20.12"

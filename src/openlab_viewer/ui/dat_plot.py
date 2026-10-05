@@ -179,7 +179,10 @@ class DatPlotCanvas(QWidget):
     reloadFormatRequested = Signal()
     axesChanged = Signal(str, object)
     displayChanged = Signal()
+    pointsChanged = Signal()
     pointActivated = Signal(object)
+    dataFilterRequested = Signal()
+    rawFileRequested = Signal()
     filterInvalidated = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -737,6 +740,7 @@ class DatPlotCanvas(QWidget):
             self._matched_row_index_set = frozenset()
             self._timestamp_reference = None
             self._selected_hit = None
+            self.pointsChanged.emit()
             return
         self._matched_row_indices = matching_row_indices(
             self.document,
@@ -783,6 +787,7 @@ class DatPlotCanvas(QWidget):
             sample_x,
         )
         self._reconcile_selected_hit()
+        self.pointsChanged.emit()
 
     def _reconcile_selected_hit(self) -> None:
         """Keep a marker only when its source row still identifies the point."""
@@ -1414,7 +1419,8 @@ class DatPlotCanvas(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         """Start a drag selection inside a panel and remember its series."""
 
-        position = QPointF(event.pos())
+        local_position = event.localPos()
+        position = QPointF(local_position.x(), local_position.y())
         panel = self._panel_at(position)
         if event.button() == Qt.LeftButton and panel is not None:
             self._drag_series, _ = panel
@@ -1429,9 +1435,10 @@ class DatPlotCanvas(QWidget):
         if self._drag_origin is not None:
             plot = self._panel_for_series(self._drag_series)
             if plot is not None:
+                local_position = event.localPos()
                 self._drag_current = QPointF(
-                    min(max(event.pos().x(), plot.left()), plot.right()),
-                    min(max(event.pos().y(), plot.top()), plot.bottom()),
+                    min(max(local_position.x(), plot.left()), plot.right()),
+                    min(max(local_position.y(), plot.top()), plot.bottom()),
                 )
                 self.update()
             event.accept()
@@ -1443,7 +1450,10 @@ class DatPlotCanvas(QWidget):
 
         if event.button() == Qt.LeftButton and self._drag_origin is not None:
             plot = self._panel_for_series(self._drag_series)
-            current = self._drag_current or QPointF(event.pos())
+            local_position = event.localPos()
+            current = self._drag_current or QPointF(
+                local_position.x(), local_position.y()
+            )
             selection = (
                 QRectF(self._drag_origin, current).normalized().intersected(plot)
                 if plot is not None
@@ -1451,6 +1461,10 @@ class DatPlotCanvas(QWidget):
             )
             ranges = self._ranges(self._drag_series)
             series = self._drag_series
+            drag_distance = math.hypot(
+                current.x() - self._drag_origin.x(),
+                current.y() - self._drag_origin.y(),
+            )
             self._drag_origin = None
             self._drag_current = None
             self._drag_series = None
@@ -1475,6 +1489,10 @@ class DatPlotCanvas(QWidget):
                 self._manual_view = True
                 self._path_cache.clear()
                 self.displayChanged.emit()
+            elif drag_distance <= scaled_float(5.0):
+                hit = self._nearest_point(current)
+                if hit is not None:
+                    self._select_point(hit)
             self.update()
             event.accept()
             return
@@ -1544,12 +1562,22 @@ class DatPlotCanvas(QWidget):
         menu = QMenu(self)
         open_action = menu.addAction("Open Data...")
         reload_action = menu.addAction("Reload Data")
+        raw_action = menu.addAction("Browse Raw File")
+        filter_action = menu.addAction("Data Filter...")
         menu.addSeparator()
         save_action = menu.addAction("Save Plot Format")
         load_action = menu.addAction("Reload Plot Format")
         reset_action = menu.addAction("Reset Zoom")
         open_action.triggered.connect(lambda checked=False: self.openRequested.emit())
         reload_action.triggered.connect(lambda checked=False: self.reloadRequested.emit())
+        raw_action.setEnabled(self.document is not None)
+        filter_action.setEnabled(self.document is not None)
+        raw_action.triggered.connect(
+            lambda checked=False: self.rawFileRequested.emit()
+        )
+        filter_action.triggered.connect(
+            lambda checked=False: self.dataFilterRequested.emit()
+        )
         save_action.triggered.connect(lambda checked=False: self.saveFormatRequested.emit())
         load_action.triggered.connect(lambda checked=False: self.reloadFormatRequested.emit())
         reset_action.triggered.connect(lambda checked=False: self.reset_zoom())

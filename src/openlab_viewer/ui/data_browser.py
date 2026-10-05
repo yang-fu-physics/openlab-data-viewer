@@ -27,6 +27,7 @@ from PySide2.QtWidgets import (
     QGridLayout,
     QLabel,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -39,6 +40,7 @@ from ..data_reader import (
     DataDocument,
     DataFormatOptions,
     DataReadError,
+    _decode,
     detect_data_format,
     read_data,
 )
@@ -142,6 +144,51 @@ class _DataReadTask(QRunnable):
         )
 
 
+class _RawTextReadSignals(QObject):
+    finished = Signal(object, object, int, object)
+
+
+class _RawTextReadTask(QRunnable):
+    """Decode the committed source file without blocking the plot window."""
+
+    def __init__(self, path: Path, encoding: str, generation: int) -> None:
+        super().__init__()
+        self.path = path
+        self.encoding = encoding
+        self.generation = generation
+        self.signals = _RawTextReadSignals()
+
+    def run(self) -> None:
+        try:
+            text = _decode(self.path.read_bytes(), self.encoding)
+        except (DataReadError, OSError) as exc:
+            self.signals.finished.emit(None, exc, self.generation, self.path)
+            return
+        self.signals.finished.emit(text, None, self.generation, self.path)
+
+
+class RawFileViewerDialog(QDialog):
+    """Show the committed source bytes as decoded, read-only text."""
+
+    def __init__(self, path: Path, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Raw File - %s" % path.name)
+        layout = QVBoxLayout(self)
+        label = QLabel("Read-only source text: %s" % path)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.text_edit.setPlainText(text)
+        layout.addWidget(self.text_edit, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
+        fit_initial_window_width(self, preferred_height=scaled(560))
+
+
 class PointDetailsDialog(QDialog):
     """Show the complete source row represented by a plotted point."""
 
@@ -152,45 +199,100 @@ class PointDetailsDialog(QDialog):
         x_label: str,
         x_value_text: str | None = None,
         parent: QWidget | None = None,
+        *,
+        navigation_hits: tuple[PlotHit, ...] = (),
+        current_index: int = 0,
+        hit_changed_callback=None,
+        x_value_formatter=None,
     ) -> None:
         super().__init__(parent)
-        point = hit.point
-        source_line = point.source_line_number or document.source_line_number(point.row_index)
-        self.setWindowTitle("Data Point Details - Source Line %d" % source_line)
+        self._document = document
+        self._x_label = x_label
+        self._initial_x_value_text = x_value_text
+        self._x_value_formatter = x_value_formatter
+        self._hit_changed_callback = hit_changed_callback
+        self._hits = tuple(navigation_hits) or (hit,)
+        self._initial_index = current_index
+        self._current_index = current_index
+        self._current_index = max(0, min(self._current_index, len(self._hits) - 1))
         layout = QVBoxLayout(self)
-        displayed_x = x_value_text if x_value_text is not None else "%.12g" % point.x
-        self.summary_label = QLabel(
+        self.summary_label = QLabel()
+        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(len(document.columns), 2)
+        self.table.setHorizontalHeaderLabels(["Field", "Value"])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        layout.addWidget(self.table, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        self.previous_button = buttons.addButton(
+            "Previous Point",
+            QDialogButtonBox.ActionRole,
+        )
+        self.next_button = buttons.addButton(
+            "Next Point",
+            QDialogButtonBox.ActionRole,
+        )
+        self.previous_button.clicked.connect(lambda: self._navigate(-1))
+        self.next_button.clicked.connect(lambda: self._navigate(1))
+        buttons.rejected.connect(self.accept)
+        layout.addWidget(buttons)
+        self._render_hit()
+        fit_initial_window_width(self, preferred_height=scaled(470))
+
+    def _format_x_value(self, value: float) -> str:
+        if self._x_value_formatter is not None:
+            return self._x_value_formatter(value)
+        return "%.12g" % value
+
+    def _render_hit(self) -> None:
+        hit = self._hits[self._current_index]
+        point = hit.point
+        source_line = point.source_line_number or self._document.source_line_number(
+            point.row_index
+        )
+        self.setWindowTitle("Data Point Details - Source Line %d" % source_line)
+        displayed_x = self._format_x_value(point.x)
+        if (
+            self._current_index == self._initial_index
+            and self._initial_x_value_text is not None
+        ):
+            displayed_x = self._initial_x_value_text
+        self.summary_label.setText(
             "File: %s\n"
             "Data row: %d    Source line: %d    %s: %s    %s: %.12g"
             % (
-                document.path,
+                self._document.path,
                 point.row_index + 1,
                 source_line,
-                x_label,
+                self._x_label,
                 displayed_x,
                 hit.series,
                 point.y,
             )
         )
-        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.summary_label.setWordWrap(True)
-        layout.addWidget(self.summary_label)
+        for row_index, (column, value) in enumerate(
+            zip(self._document.columns, point.row)
+        ):
+            self.table.setItem(row_index, 0, QTableWidgetItem(column))
+            self.table.setItem(row_index, 1, QTableWidgetItem(value))
+        self.previous_button.setEnabled(self._current_index > 0)
+        self.next_button.setEnabled(self._current_index < len(self._hits) - 1)
 
-        table = QTableWidget(len(document.columns), 2)
-        table.setHorizontalHeaderLabels(["Field", "Value"])
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.verticalHeader().setVisible(False)
-        for row_index, (column, value) in enumerate(zip(document.columns, point.row)):
-            table.setItem(row_index, 0, QTableWidgetItem(column))
-            table.setItem(row_index, 1, QTableWidgetItem(value))
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        layout.addWidget(table, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(self.accept)
-        layout.addWidget(buttons)
-        fit_initial_window_width(self, preferred_height=scaled(470))
+    def _navigate(self, offset: int) -> None:
+        next_index = self._current_index + offset
+        if not 0 <= next_index < len(self._hits):
+            return
+        self._current_index = next_index
+        hit = self._hits[self._current_index]
+        if self._hit_changed_callback is not None:
+            self._hit_changed_callback(hit)
+        self._render_hit()
 
 
 class DatBrowserWidget(QWidget):
@@ -228,6 +330,10 @@ class DatBrowserWidget(QWidget):
         self._read_generation = 0
         self._refresh_in_flight = False
         self._refresh_task: _DataReadTask | None = None
+        self._raw_text_generation = 0
+        self._raw_text_task: _RawTextReadTask | None = None
+        self._raw_file_dialog: RawFileViewerDialog | None = None
+        self._point_details_dialog: PointDetailsDialog | None = None
         self._background_show_errors = False
         self._background_allow_import_retry = False
         self._initial_display_format = initial_display_format
@@ -301,8 +407,11 @@ class DatBrowserWidget(QWidget):
         self.canvas.reloadFormatRequested.connect(self.reload_format)
         self.canvas.axesChanged.connect(self._update_status)
         self.canvas.displayChanged.connect(self._display_changed)
+        self.canvas.pointsChanged.connect(self._close_point_details_dialog)
         self.canvas.filterInvalidated.connect(self._filter_invalidated)
         self.canvas.pointActivated.connect(self._show_point_details)
+        self.canvas.dataFilterRequested.connect(self.open_data_filter)
+        self.canvas.rawFileRequested.connect(self.browse_raw_file)
 
         self.monitor_timer = QTimer(self)
         self.monitor_timer.setInterval(5000)
@@ -369,6 +478,69 @@ class DatBrowserWidget(QWidget):
             dialog.exec_()
         finally:
             dialog.deleteLater()
+
+    def browse_raw_file(self) -> None:
+        """Open the committed source text in a read-only background-loaded view."""
+
+        if self.document is None or self.current_path is None:
+            QMessageBox.information(
+                self,
+                "Browse Raw File",
+                "Open a data file before browsing its raw text.",
+            )
+            return
+        source = self.current_path
+        self._raw_text_generation += 1
+        generation = self._raw_text_generation
+        task = _RawTextReadTask(
+            source,
+            self.document.format_options.encoding,
+            generation,
+        )
+        self._raw_text_task = task
+        self.status_label.setText("Reading raw text from %s" % source.name)
+        task.signals.finished.connect(self._raw_file_read_finished)
+        QThreadPool.globalInstance().start(task)
+
+    def _raw_file_read_finished(
+        self,
+        text: str | None,
+        error: DataReadError | None,
+        generation: int,
+        source: Path,
+    ) -> None:
+        if generation != self._raw_text_generation:
+            return
+        self._raw_text_task = None
+        if self.document is None or self.current_path != source:
+            return
+        if error is not None:
+            self.status_label.setText(
+                "Unable to browse raw text from %s: %s" % (source.name, error)
+            )
+            QMessageBox.warning(self, "Unable to Browse Raw File", str(error))
+            return
+        dialog = RawFileViewerDialog(source, text, self)
+        self._raw_file_dialog = dialog
+        dialog.finished.connect(
+            lambda result, closed_dialog=dialog: self._raw_dialog_closed(
+                closed_dialog
+            )
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._update_status(self.canvas.x_label, self.canvas.y_columns)
+
+    def _raw_dialog_closed(self, dialog: RawFileViewerDialog) -> None:
+        if self._raw_file_dialog is dialog:
+            self._raw_file_dialog = None
+
+    def _close_point_details_dialog(self) -> None:
+        dialog = self._point_details_dialog
+        if dialog is not None:
+            self._point_details_dialog = None
+            dialog.close()
 
     def _apply_data_filter(self, data_filter: DataFilter) -> bool:
         try:
@@ -542,6 +714,8 @@ class DatBrowserWidget(QWidget):
     ) -> bool:
         """Commit a complete read and apply the best available display state."""
 
+        self._raw_text_generation += 1
+        self._raw_text_task = None
         source = document.path
         same_file = self.current_path == source and self.document is not None
         previous_x = self.canvas.x_column
@@ -855,10 +1029,16 @@ class DatBrowserWidget(QWidget):
         """Invalidate queued reads before the view is destroyed."""
 
         self._read_generation += 1
+        self._raw_text_generation += 1
         self._refresh_in_flight = False
         self._refresh_task = None
+        self._raw_text_task = None
         self._pending_read_path = None
         self._pending_read_options = None
+        self._close_point_details_dialog()
+        if self._raw_file_dialog is not None:
+            self._raw_file_dialog.close()
+            self._raw_file_dialog = None
         self.monitor_timer.stop()
         super().closeEvent(event)
 
@@ -898,16 +1078,46 @@ class DatBrowserWidget(QWidget):
     def _show_point_details(self, hit: PlotHit) -> None:
         if self.document is None:
             return
+        navigation_hits = tuple(
+            PlotHit(hit.series, point)
+            for point in self.canvas.points_by_series.get(hit.series, ())
+            if self.canvas._point_is_plottable(point)
+        )
+        current_index = next(
+            (
+                index
+                for index, candidate in enumerate(navigation_hits)
+                if candidate.row_index == hit.row_index
+                and candidate.row == hit.row
+            ),
+            None,
+        )
+        if current_index is None:
+            return
+
+        def select_detail_hit(next_hit: PlotHit) -> None:
+            self.canvas._select_point(next_hit)
+
         dialog = PointDetailsDialog(
             self.document,
             hit,
             self.canvas.x_label,
             self.canvas.format_x_value(hit.x, full=True),
             self,
+            navigation_hits=navigation_hits,
+            current_index=current_index,
+            hit_changed_callback=select_detail_hit,
+            x_value_formatter=lambda value: self.canvas.format_x_value(
+                value,
+                full=True,
+            ),
         )
+        self._point_details_dialog = dialog
         try:
             dialog.exec_()
         finally:
+            if self._point_details_dialog is dialog:
+                self._point_details_dialog = None
             dialog.deleteLater()
 
     @staticmethod

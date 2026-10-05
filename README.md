@@ -29,6 +29,10 @@ OpenLab Control runtime so it can be released as its own executable.
   linear or logarithmic axes and PLT sidecar state.
 - Filter plotted rows with five independent numeric conditions, preserving source
   row identity and per-view state.
+- Single-click a plotted point to mark it; double-click opens its complete row
+  details with Previous Point / Next Point navigation in filtered source order.
+- Use the plot context menu to open the same Data Filter dialog or browse the
+  committed source file as read-only raw text.
 - Use English labels, dialogs, status messages, and error messages throughout
   the viewer.
 

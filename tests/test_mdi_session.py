@@ -7,6 +7,7 @@ import time
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from unittest.mock import patch
 
 
 VIEWER_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,7 @@ class MdiSessionTests(unittest.TestCase):
         from openlab_viewer.data_filter import DataFilter, DataFilterRow
         from openlab_viewer.plot_format import PlotFormat
         from openlab_viewer.ui.dat_plot import STACKED_LAYOUT
+        from openlab_viewer.ui.data_browser import PointDetailsDialog
         from openlab_viewer.ui.data_filter_dialog import DataFilterDialog
 
         cls.DataFormatOptions = DataFormatOptions
@@ -42,6 +44,7 @@ class MdiSessionTests(unittest.TestCase):
         cls.DataFilterRow = DataFilterRow
         cls.PlotFormat = PlotFormat
         cls.DataFilterDialog = DataFilterDialog
+        cls.PointDetailsDialog = PointDetailsDialog
         cls.STACKED_LAYOUT = STACKED_LAYOUT
         cls.QCheckBox = QCheckBox
         cls.QDateTimeEdit = QDateTimeEdit
@@ -115,6 +118,55 @@ class MdiSessionTests(unittest.TestCase):
                 if before.pixel(x, y) != after.pixel(x, y):
                     changed_pixels += 1
         return activated, position, changed_pixels
+
+    def _click_point(self, browser, point):
+        """Exercise a left click and confirm its rendered marker change."""
+
+        from PySide2.QtCore import QEvent, QPointF
+        from PySide2.QtGui import QMouseEvent
+
+        canvas = browser.canvas
+        before = canvas.grab().toImage()
+        plot = canvas._plot_rect()
+        ranges = canvas._ranges(None)
+        self.assertIsNotNone(ranges)
+        position = canvas._screen_point(point.x, point.y, plot, ranges)
+        self.assertIsNotNone(position)
+        canvas.mousePressEvent(
+            QMouseEvent(
+                QEvent.MouseButtonPress,
+                QPointF(position),
+                self.Qt.LeftButton,
+                self.Qt.LeftButton,
+                self.Qt.NoModifier,
+            )
+        )
+        canvas.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.MouseButtonRelease,
+                QPointF(position),
+                self.Qt.LeftButton,
+                self.Qt.NoButton,
+                self.Qt.NoModifier,
+            )
+        )
+        self.application.processEvents()
+        after = canvas.grab().toImage()
+        device_ratio = max(1.0, float(before.devicePixelRatio()))
+        center_x = int(position.x() * device_ratio)
+        center_y = int(position.y() * device_ratio)
+        changed_pixels = 0
+        for x in range(
+            max(0, center_x - int(10 * device_ratio)),
+            min(before.width(), center_x + int(10 * device_ratio) + 1),
+        ):
+            for y in range(
+                max(0, center_y - int(10 * device_ratio)),
+                min(before.height(), center_y + int(10 * device_ratio) + 1),
+            ):
+                if before.pixel(x, y) != after.pixel(x, y):
+                    changed_pixels += 1
+        return position, changed_pixels
 
     def test_about_dialog_contains_dynamic_version_and_external_links(self) -> None:
         session = self.DataViewerSession(Path("."))
@@ -271,6 +323,64 @@ class MdiSessionTests(unittest.TestCase):
         self.assertEqual(dense.canvas.selected_hit.row_index, selected.row_index)
         self.assertGreater(changed_pixels, 10)
 
+    def test_single_click_selects_without_popup_and_drag_does_not_select(self) -> None:
+        from PySide2.QtCore import QEvent, QPointF
+        from PySide2.QtGui import QMouseEvent
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "click.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y",)))
+        browser.canvas.resize(800, 500)
+        browser.canvas.show()
+        self.application.processEvents()
+
+        _, changed_pixels = self._click_point(browser, browser.canvas.points[1])
+        self.assertEqual(browser.canvas.selected_hit.row_index, 1)
+        self.assertIsNone(browser._point_details_dialog)
+        self.assertGreater(changed_pixels, 10)
+
+        browser.canvas._selected_hit = None
+        before = browser.canvas.points[1]
+        plot = browser.canvas._plot_rect()
+        ranges = browser.canvas._ranges(None)
+        start = browser.canvas._screen_point(before.x, before.y, plot, ranges)
+        drag_end = QPointF(start.x() + 30, start.y() + 30)
+        browser.canvas.mousePressEvent(
+            QMouseEvent(
+                QEvent.MouseButtonPress,
+                start,
+                self.Qt.LeftButton,
+                self.Qt.LeftButton,
+                self.Qt.NoModifier,
+            )
+        )
+        browser.canvas.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.MouseMove,
+                drag_end,
+                self.Qt.NoButton,
+                self.Qt.LeftButton,
+                self.Qt.NoModifier,
+            )
+        )
+        browser.canvas.mouseReleaseEvent(
+            QMouseEvent(
+                QEvent.MouseButtonRelease,
+                drag_end,
+                self.Qt.LeftButton,
+                self.Qt.NoButton,
+                self.Qt.NoModifier,
+            )
+        )
+        self.assertIsNone(browser.canvas.selected_hit)
+
     def test_selected_point_is_local_and_reconciles_refresh_and_filter(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -370,6 +480,241 @@ class MdiSessionTests(unittest.TestCase):
         )
         self.assertNotEqual((old_position.x(), old_position.y()), (new_position.x(), new_position.y()))
         self.assertEqual(browser.canvas.selected_hit.row_index, 1)
+
+    def test_point_details_navigate_filtered_points_in_source_order(self) -> None:
+        from openlab_viewer.ui.dat_plot import PlotHit
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "details.csv"
+        path.write_text(
+            "x,y\n5,50\n1,10\n4,40\n2,20\n3,-30\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y",)))
+        browser.canvas.set_data_filter(self._filter("x", 1, 4))
+        self.assertEqual(
+            tuple(point.row_index for point in browser.canvas.points),
+            (1, 2, 3, 4),
+        )
+        navigation_hits = tuple(
+            PlotHit("y", point)
+            for point in browser.canvas.points
+            if browser.canvas._point_is_plottable(point)
+        )
+        changed = []
+        dialog = self.PointDetailsDialog(
+            browser.document,
+            navigation_hits[1],
+            browser.canvas.x_label,
+            parent=browser,
+            navigation_hits=navigation_hits,
+            current_index=1,
+            hit_changed_callback=changed.append,
+            x_value_formatter=lambda value: browser.canvas.format_x_value(
+                value,
+                full=True,
+            ),
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.assertTrue(dialog.previous_button.isEnabled())
+        self.assertTrue(dialog.next_button.isEnabled())
+        dialog._navigate(1)
+        self.assertEqual(dialog._hits[dialog._current_index].row_index, 3)
+        self.assertEqual(changed[-1].row_index, 3)
+        self.assertIn("Data row: 4", dialog.summary_label.text())
+        dialog._navigate(-1)
+        self.assertEqual(dialog._hits[dialog._current_index].row_index, 2)
+        self.assertEqual(changed[-1].row_index, 2)
+
+        browser.canvas.set_x_scale("log")
+        browser.canvas.set_y_scale("log")
+        log_hits = tuple(
+            PlotHit("y", point)
+            for point in browser.canvas.points_by_series["y"]
+            if browser.canvas._point_is_plottable(point)
+        )
+        self.assertEqual(tuple(hit.row_index for hit in log_hits), (1, 2, 3))
+
+    def test_point_details_closes_when_filter_or_refresh_rebuilds_points(self) -> None:
+        from openlab_viewer.ui.dat_plot import PlotHit
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "details-refresh.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        self.assertTrue(browser.canvas.set_axes("x", ("y",)))
+        hit = PlotHit("y", browser.canvas.points[1])
+        dialog = self.PointDetailsDialog(browser.document, hit, "x", parent=browser)
+        self.addCleanup(dialog.deleteLater)
+        browser._point_details_dialog = dialog
+        dialog.show()
+        browser.canvas.set_data_filter(self._filter("x", 3, 3))
+        self.assertIsNone(browser._point_details_dialog)
+        self.assertFalse(dialog.isVisible())
+
+        browser.canvas.set_data_filter(self.DataFilter.empty())
+        hit = PlotHit("y", browser.canvas.points[1])
+        refreshed_dialog = self.PointDetailsDialog(
+            browser.document,
+            hit,
+            "x",
+            parent=browser,
+        )
+        self.addCleanup(refreshed_dialog.deleteLater)
+        browser._point_details_dialog = refreshed_dialog
+        refreshed_dialog.show()
+        path.write_text("x,y\n1,11\n2,20\n3,30\n", encoding="utf-8")
+        self.assertTrue(
+            browser.load_path(
+                path,
+                show_errors=False,
+                format_options=browser.format_options,
+            )
+        )
+        self.assertIsNone(browser._point_details_dialog)
+        self.assertFalse(refreshed_dialog.isVisible())
+
+    def test_raw_file_read_error_is_visible(self) -> None:
+        from openlab_viewer.data_reader import DataReadError
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "raw-error.csv"
+        path.write_text("x,y\n1,10\n2,20\n3,30\n", encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        with patch.object(self.QMessageBox, "warning") as warning:
+            browser._raw_file_read_finished(
+                None,
+                DataReadError("decode failed"),
+                browser._raw_text_generation,
+                browser.current_path,
+            )
+        warning.assert_called_once()
+        self.assertIn("decode failed", browser.status_label.text())
+
+    def test_large_raw_file_browse_starts_without_blocking_dispatch(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "large-raw.csv"
+        path.write_text(
+            "x,y\n"
+            + "\n".join(
+                "%d,%d" % (index, index % 1000)
+                for index in range(1, 210_001)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        browser = session.new_subwindow()
+        self.assertTrue(browser.load_path(path, show_errors=False))
+        menu = browser.canvas.build_context_menu()
+        self.addCleanup(menu.deleteLater)
+        raw_action = next(
+            action
+            for action in menu.actions()
+            if action.text() == "Browse Raw File"
+        )
+        started = time.monotonic()
+        raw_action.trigger()
+        self.assertLess(time.monotonic() - started, 0.2)
+        deadline = time.monotonic() + 3.0
+        while browser._raw_file_dialog is None and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+        self.assertIsNotNone(browser._raw_file_dialog)
+        self.addCleanup(browser._raw_file_dialog.close)
+
+    def test_context_menu_browses_current_raw_file_and_reuses_filter_entry(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        first_path = Path(temporary.name) / "first.csv"
+        second_path = Path(temporary.name) / "second.csv"
+        first_text = "x,y\n1,10\n2,20\n3,30\n"
+        second_text = "x,y\n7,70\n8,80\n9,90\n"
+        first_path.write_text(first_text, encoding="utf-8")
+        second_path.write_text(second_text, encoding="utf-8")
+
+        session = self.DataViewerSession(Path("."))
+        self.addCleanup(session.main_window.close)
+        first = session.new_subwindow()
+        second = session.new_subwindow()
+        empty = session.new_subwindow()
+        self.assertTrue(first.load_path(first_path, show_errors=False))
+        self.assertTrue(second.load_path(second_path, show_errors=False))
+        first.canvas.set_data_filter(self._filter("x", 2, 2))
+        first._pending_import_path = second_path
+
+        def action_named(menu, name):
+            return next(action for action in menu.actions() if action.text() == name)
+
+        first_menu = first.canvas.build_context_menu()
+        self.addCleanup(first_menu.deleteLater)
+        raw_action = action_named(first_menu, "Browse Raw File")
+        filter_action = action_named(first_menu, "Data Filter...")
+        self.assertTrue(raw_action.isEnabled())
+        self.assertTrue(filter_action.isEnabled())
+
+        filter_requests = []
+        first.canvas.dataFilterRequested.disconnect(first.open_data_filter)
+        first.canvas.dataFilterRequested.connect(lambda: filter_requests.append(first))
+        try:
+            filter_action.trigger()
+        finally:
+            first.canvas.dataFilterRequested.disconnect()
+            first.canvas.dataFilterRequested.connect(first.open_data_filter)
+        self.assertEqual(filter_requests, [first])
+        self.assertEqual(first.canvas.matched_row_indices, (1,))
+
+        started = time.monotonic()
+        raw_action.trigger()
+        self.assertLess(time.monotonic() - started, 0.2)
+        deadline = time.monotonic() + 2.0
+        while first._raw_file_dialog is None and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+        self.assertIsNotNone(first._raw_file_dialog)
+        first_dialog = first._raw_file_dialog
+        self.addCleanup(first_dialog.close)
+        self.assertTrue(first_dialog.text_edit.isReadOnly())
+        self.assertIn(first_text, first_dialog.text_edit.toPlainText())
+        self.assertIn("1,10", first_dialog.text_edit.toPlainText())
+        self.assertEqual(first_path.read_text(encoding="utf-8"), first_text)
+
+        second_menu = second.canvas.build_context_menu()
+        self.addCleanup(second_menu.deleteLater)
+        action_named(second_menu, "Browse Raw File").trigger()
+        deadline = time.monotonic() + 2.0
+        while second._raw_file_dialog is None and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+        self.assertIsNotNone(second._raw_file_dialog)
+        second_dialog = second._raw_file_dialog
+        self.addCleanup(second_dialog.close)
+        self.assertIn(second_text, second_dialog.text_edit.toPlainText())
+        self.assertNotIn(first_text, second_dialog.text_edit.toPlainText())
+
+        empty_menu = empty.canvas.build_context_menu()
+        self.addCleanup(empty_menu.deleteLater)
+        self.assertFalse(action_named(empty_menu, "Browse Raw File").isEnabled())
+        self.assertFalse(action_named(empty_menu, "Data Filter...").isEnabled())
 
     def test_background_initial_load_commits_after_gui_events_can_run(self) -> None:
         temporary = tempfile.TemporaryDirectory()
